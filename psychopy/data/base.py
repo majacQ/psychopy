@@ -1,13 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-from __future__ import absolute_import, print_function
-
-# from future import standard_library
-# standard_library.install_aliases()
-from builtins import str
-from past.builtins import basestring
-from builtins import object
 import weakref
 import pickle
 import os
@@ -18,7 +11,7 @@ import codecs
 import numpy as np
 import pandas as pd
 import json_tricks
-from pkg_resources import parse_version
+from packaging.version import Version
 
 import psychopy
 from psychopy import logging
@@ -30,7 +23,7 @@ from .utils import _getExcelCellName
 
 try:
     import openpyxl
-    if parse_version(openpyxl.__version__) >= parse_version('2.4.0'):
+    if Version(openpyxl.__version__) >= Version('2.4.0'):
         # openpyxl moved get_column_letter to utils.cell
         from openpyxl.utils.cell import get_column_letter
     else:
@@ -43,7 +36,7 @@ except ImportError:
 _experiments = weakref.WeakValueDictionary()
 
 
-class _ComparisonMixin(object):
+class _ComparisonMixin():
     def __eq__(self, other):
         # NoneType and booleans, for example, don't have a .__dict__ attribute.
         try:
@@ -127,7 +120,7 @@ class _BaseTrialHandler(_ComparisonMixin):
         """
         fileName = pathToString(fileName)
 
-        if self.thisTrialN < 1 and self.thisRepN < 1:
+        if self.thisTrialN < 0 and self.thisRepN < 0:
             # if both are < 1 we haven't started
             if self.autoLog:
                 logging.info('.saveAsPickle() called but no trials completed.'
@@ -198,7 +191,7 @@ class _BaseTrialHandler(_ComparisonMixin):
         if stimOut is None:
             stimOut = []
 
-        if self.thisTrialN < 1 and self.thisRepN < 1:
+        if self.thisTrialN < 0 and self.thisRepN < 0:
             # if both are < 1 we haven't started
             if self.autoLog:
                 logging.info('TrialHandler.saveAsText called but no trials'
@@ -295,12 +288,15 @@ class _BaseTrialHandler(_ComparisonMixin):
 
             appendFile: True or False
                 If False any existing file with this name will be
-                overwritten. If True then a new worksheet will be appended.
+                kept and a new file will be created with a slightly different
+                name. If you want to overwrite the old file, pass 'overwrite'
+                to ``fileCollisionMethod``.
+                If True then a new worksheet will be appended.
                 If a worksheet already exists with that name a number will
                 be added to make it unique.
 
             fileCollisionMethod: string
-                Collision method passed to
+                Collision method (``rename``,``overwrite``, ``fail``) passed to
                 :func:`~psychopy.tools.fileerrortools.handleFileCollision`
                 This is ignored if ``append`` is ``True``.
 
@@ -310,7 +306,7 @@ class _BaseTrialHandler(_ComparisonMixin):
         if stimOut is None:
             stimOut = []
 
-        if self.thisTrialN < 1 and self.thisRepN < 1:
+        if self.thisTrialN < 0 and self.thisRepN < 0:
             # if both are < 1 we haven't started
             if self.autoLog:
                 logging.info('TrialHandler.saveAsExcel called but no '
@@ -337,7 +333,9 @@ class _BaseTrialHandler(_ComparisonMixin):
             newWorkbook = False
         else:
             if not appendFile:
-                # the file exists but we're not appending, will be overwritten
+                # the file exists but we're not appending, a new file will
+                # be saved with a slightly different name, unless 
+                # fileCollisionMethod = ``overwrite``
                 fileName = handleFileCollision(fileName,
                                                fileCollisionMethod)
             wb = Workbook()  # create new workbook
@@ -508,7 +506,7 @@ class DataHandler(_ComparisonMixin, dict):
         """
         if not shape:
             shape = self.dataShape
-        if not isinstance(names, basestring):
+        if not isinstance(names, str):
             # recursively call this function until we have a string
             for thisName in names:
                 self.addDataType(thisName)

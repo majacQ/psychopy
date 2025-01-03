@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 
-from builtins import object
 from psychopy import info, visual
 import pytest
 
@@ -8,11 +7,11 @@ import pytest
 
 
 @pytest.mark.info
-class TestInfo(object):
+class TestInfo():
     @classmethod
     def setup_class(self):
         self.win = visual.Window(size=(100,100), autoLog=False)
-    def teardown(self):
+    def teardown_method(self):
         self.win.close()
 
     def test_info(self):

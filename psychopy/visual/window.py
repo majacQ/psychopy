@@ -4,10 +4,11 @@
 """A class representing a window for displaying one or more stimuli"""
 
 # Part of the PsychoPy library
-# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2021 Open Science Tools Ltd.
+# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2024 Open Science Tools Ltd.
 # Distributed under the terms of the GNU General Public License (GPL).
 
-from __future__ import absolute_import, division, print_function
+
+
 
 import ctypes
 import os
@@ -15,22 +16,20 @@ import sys
 import weakref
 import atexit
 from itertools import product
-
-# from builtins import map
-from builtins import object
-from builtins import range
-from builtins import str
-from past.builtins import basestring
 from collections import deque
 
 from psychopy.contrib.lazy_import import lazy_import
 from psychopy import colors, event
+from psychopy.localization import _translate
+from psychopy.tools.systemtools import getCurrentPID, registerPID
 import math
 # from psychopy.clock import monotonicClock
 
 # try to find avbin (we'll overload pyglet's load_library tool and then
 # add some paths)
 from ..colors import Color, colorSpaces
+from .textbox2 import TextBox2
+
 
 haveAvbin = False
 
@@ -77,7 +76,7 @@ if sys.platform == 'win32':
 import psychopy  # so we can get the __path__
 from psychopy import core, platform_specific, logging, prefs, monitors
 import psychopy.event
-from . import backends
+from . import backends, image
 
 # tools must only be imported *after* event or MovieStim breaks on win32
 # (JWP has no idea why!)
@@ -138,7 +137,7 @@ class OpenWinList(list):
 openWindows = core.openWindows = OpenWinList()  # core needs this for wait()
 
 
-class Window(object):
+class Window():
     """Used to set up a context in which to draw objects,
     using either `pyglet <http://www.pyglet.org>`_,
     `pygame <http://www.pygame.org>`_, or `glfw <https://www.glfw.org>`_.
@@ -160,6 +159,8 @@ class Window(object):
                  pos=None,
                  color=(0, 0, 0),
                  colorSpace='rgb',
+                 backgroundImage=None,
+                 backgroundFit="cover",
                  rgb=None,
                  dkl=None,
                  lms=None,
@@ -181,6 +182,7 @@ class Window(object):
                  numSamples=2,
                  stereo=False,
                  name='window1',
+                 title="PsychoPy",
                  checkTiming=True,
                  useFBO=False,
                  useRetina=True,
@@ -189,7 +191,8 @@ class Window(object):
                  bpc=(8, 8, 8),
                  depthBits=8,
                  stencilBits=8,
-                 backendConf=None):
+                 backendConf=None,
+                 infoMsg=None):
         """
         These attributes can only be set at initialization. See further down
         for a list of attributes which can be changed after initialization
@@ -201,7 +204,7 @@ class Window(object):
             Size of the window in pixels [x, y].
         pos : array-like of int
             Location of the top-left corner of the window on the screen [x, y].
-        color : `rray-like of float
+        color : array-like of float
             Color of background as [r, g, b] list or single value. Each gun can
             take values between -1.0 and 1.0.
         fullscr : bool or None
@@ -242,7 +245,9 @@ class Window(object):
             instead.
         checkTiming : bool
             Whether to calculate frame duration on initialization. Estimated
-            duration is saved in :py:attr:`~Window.monitorFramePeriod`.
+            duration is saved in :py:attr:`~Window.monitorFramePeriod`. The
+            message displayed on the screen can be set with the `infoMsg`
+            argument.
         allowStencil : bool
             When set to `True`, this allows operations that use the OpenGL
             stencil buffer (notably, allowing the
@@ -264,6 +269,9 @@ class Window(object):
             this will be enabled. You can switch between left and right-eye
             scenes for drawing operations using
             :py:attr:`~psychopy.visual.Window.setBuffer()`.
+        title : str
+            Name of the Window according to your Operating System. This is
+            the text which appears on the title sash.
         useRetina : bool
             In PsychoPy >1.85.3 this should always be `True` as pyglet
             (or Apple) no longer allows us to create a non-retina display.
@@ -295,6 +303,11 @@ class Window(object):
             available across all of them. This allows you to pass special
             configuration options to a specific backend to configure the
             feature.
+        infoMsg : str or None
+            Message to display during frame rate measurement (i.e., when
+            ``checkTiming=True``). Default is None, which means that a default
+            message is displayed. If you want to hide the message, pass an
+            empty string.
 
         Notes
         -----
@@ -327,7 +340,10 @@ class Window(object):
 
         self.autoLog = False  # to suppress log msg during init
         self.name = name
-        self.clientSize = numpy.array(size, numpy.int)  # size of window, not buffer
+        self.clientSize = numpy.array(size, int)  # size of window, not buffer
+        # size of the window when restored (not fullscreen)
+        self._windowedSize = self.clientSize.copy()
+
         self.pos = pos
         # this will get overridden once the window is created
         self.winHandle = None
@@ -346,7 +362,7 @@ class Window(object):
         # convert to a Monitor object
         if not monitor:
             self.monitor = monitors.Monitor('__blank__', autoLog=autoLog)
-        elif isinstance(monitor, basestring):
+        elif isinstance(monitor, str):
             self.monitor = monitors.Monitor(monitor, autoLog=autoLog)
         elif hasattr(monitor, 'keys'):
             # convert into a monitor object
@@ -365,12 +381,11 @@ class Window(object):
         else:
             self.scrWidthPIX = scrSize[0]
 
+        # if fullscreen not specified, get from prefs
         if fullscr is None:
             fullscr = prefs.general['fullscr']
         self._isFullScr = fullscr
 
-        if units is None:
-            units = prefs.general['units']
         self.units = units
 
         if allowGUI is None:
@@ -430,7 +445,7 @@ class Window(object):
 
         # setup context and openGL()
         if winType is None:  # choose the default windowing
-            winType = prefs.general['winType']
+            winType = "pyglet"
         self.winType = winType
 
         # setup the context
@@ -477,9 +492,12 @@ class Window(object):
 
         self.blendMode = self.blendMode
 
+        # now that we have a window handle, set title
+        self.title = title
+
         # parameters for transforming the overall view
         self.viewScale = val2array(viewScale)
-        if self.viewPos is not None and self.units is None:
+        if viewPos is not None and self.units is None:
             raise ValueError('You must define the window units to use viewPos')
         self.viewPos = val2array(viewPos, withScalar=False)
         self.viewOri = float(viewOri)
@@ -498,15 +516,22 @@ class Window(object):
         # iohub was active, also send them to iohub.
         #
         if IOHUB_ACTIVE:
-            from psychopy.iohub.client import ioHubConnection
-            if ioHubConnection.ACTIVE_CONNECTION:
-                winhwnds = []
+            from psychopy.iohub.client import ioHubConnection as ioconn
+            if ioconn.ACTIVE_CONNECTION:
+                from psychopy.iohub.client import windowInfoDict
+                win_infos = []
+                win_handles = []
                 for w in openWindows:
-                    winhwnds.append(w()._hw_handle)
-                if self.winHandle not in winhwnds:
-                    winhwnds.append(self._hw_handle)
-                conn = ioHubConnection.ACTIVE_CONNECTION
-                conn.registerWindowHandles(*winhwnds)
+                    winfo = windowInfoDict(w())
+                    win_infos.append(winfo)
+                    win_handles.append(w()._hw_handle)
+
+                if self._hw_handle not in win_handles:
+                    winfo = windowInfoDict(self)
+                    win_infos.append(winfo)
+                    win_handles.append(self._hw_handle)
+                ioconn.ACTIVE_CONNECTION.registerWindowHandles(*win_infos)
+                self.backend.onMoveCallback = ioconn.ACTIVE_CONNECTION.updateWindowPos
 
         # near and far clipping planes
         self._nearClip = 0.1
@@ -519,6 +544,9 @@ class Window(object):
         self.cullFace = False
         self.cullFaceMode = 'back'
         self.draw3d = False
+
+        # gl viewport and scissor
+        self._viewport = self._scissor = None  # set later
 
         # scene light sources
         self._lights = []
@@ -567,8 +595,12 @@ class Window(object):
         self._frameTimes = deque(maxlen=1000)  # 1000 keeps overhead low
 
         self._toDraw = []
+        self._heldDraw = []
         self._toDrawDepths = []
         self._eventDispatchers = []
+
+        # dict of stimulus:validator pairs
+        self.validators = {}
 
         self.lastFrameT = core.getTime()
         self.waitBlanking = waitBlanking
@@ -579,15 +611,28 @@ class Window(object):
 
         self.refreshThreshold = 1.0  # initial val needed by flip()
 
+        # store editable stimuli
         self._editableChildren = []
         self._currentEditableRef = None
+        # store draggable stimuli
+        self.currentDraggable = None
+
+        # splash screen
+        self._splashTextbox = None  # created on first use
+        self._showSplash = False
+        self.resetViewport()  # set viewport to full window size
+
+        # piloting indicator
+        self._pilotingIndicator = None
+        self._showPilotingIndicator = False
 
         # over several frames with no drawing
         self._monitorFrameRate = None
         # for testing when to stop drawing a stim:
         self.monitorFramePeriod = 0.0
         if checkTiming:
-            self._monitorFrameRate = self.getActualFrameRate()
+            self._monitorFrameRate = self.getActualFrameRate(infoMsg=infoMsg)
+
         if self._monitorFrameRate is not None:
             self.monitorFramePeriod = 1.0 / self._monitorFrameRate
         else:
@@ -610,6 +655,10 @@ class Window(object):
         atexit.register(close_on_exit)
 
         self._mouse = event.Mouse(win=self)
+        self.backgroundImage = backgroundImage
+        self.backgroundFit = backgroundFit
+        if hasattr(self.backgroundImage, "draw"):
+            self.backgroundImage.draw()
 
     def __del__(self):
         if self._closed is False:
@@ -638,6 +687,19 @@ class Window(object):
         return s
 
     @attributeSetter
+    def title(self, value):
+        self.__dict__['title'] = value
+        if hasattr(self.winHandle, "set_caption"):
+            # Pyglet backend
+            self.winHandle.set_caption(value)
+        elif hasattr(self.winHandle, "SetWindowTitle"):
+            # GLFW backend
+            self.winHandle.SetWindowTitle(value)
+        else:
+            # Unknown backend
+            logging.warning(f"Cannot set Window title in backend {self.winType}")
+
+    @attributeSetter
     def units(self, value):
         """*None*, 'height' (of the window), 'norm', 'deg', 'cm', 'pix'
         Defines the default units of stimuli initialized in the window.
@@ -650,6 +712,8 @@ class Window(object):
         See :ref:`units` for explanation of options.
 
         """
+        if value is None:
+            value = prefs.general['units']
         self.__dict__['units'] = value
 
     def setUnits(self, value, log=True):
@@ -686,13 +750,17 @@ class Window(object):
     def setViewPos(self, value, log=True):
         setAttribute(self, 'viewPos', value, log=log)
 
-    @attributeSetter
+    @property
+    def fullscr(self):
+        """Return whether the window is in fullscreen mode."""
+        return self._isFullScr
+
+    @fullscr.setter
     def fullscr(self, value):
         """Set whether fullscreen mode is `True` or `False` (not all backends
         can toggle an open window).
         """
         self.backend.setFullScr(value)
-        self.__dict__['fullscr'] = value
         self._isFullScr = value
 
     @attributeSetter
@@ -852,7 +920,7 @@ class Window(object):
                              'args': args,
                              'kwargs': kwargs})
 
-    def timeOnFlip(self, obj, attrib):
+    def timeOnFlip(self, obj, attrib, format=float):
         """Retrieves the time on the next flip and assigns it to the `attrib`
         for this `obj`.
 
@@ -862,6 +930,8 @@ class Window(object):
             A mutable object (usually a dict of class instance).
         attrib : str
             Key or attribute of `obj` to assign the flip time to.
+        format : str, class or None
+            Format in which to return time, see clock.Timestamp.resolve() for more info. Defaults to `float`.
 
         Examples
         --------
@@ -870,7 +940,7 @@ class Window(object):
             win.getTimeOnFlip(myTimingDict, 'tStartRefresh')
 
         """
-        self.callOnFlip(self._assignFlipTime, obj, attrib)
+        self.callOnFlip(self._assignFlipTime, obj, attrib, format)
 
     def getFutureFlipTime(self, targetTime=0, clock=None):
         """The expected time of the next screen refresh. This is currently
@@ -911,7 +981,7 @@ class Window(object):
 
         return output
 
-    def _assignFlipTime(self, obj, attrib):
+    def _assignFlipTime(self, obj, attrib, format=float):
         """Helper function to assign the time of last flip to the obj.attrib
 
         Parameters
@@ -920,17 +990,29 @@ class Window(object):
             A mutable object (usually a dict of class instance).
         attrib : str
             Key or attribute of ``obj`` to assign the flip time to.
+        format : str, class or None
+            Format in which to return time, see clock.Timestamp.resolve() for more info. Defaults to `float`.
 
         """
+        frameTime = self._frameTime.resolve(format=format)
         if hasattr(obj, attrib):
-            setattr(obj, attrib, self._frameTime)
+            setattr(obj, attrib, frameTime)
         elif isinstance(obj, dict):
-            obj[attrib] = self._frameTime
+            obj[attrib] = frameTime
         else:
             raise TypeError("Window.getTimeOnFlip() should be called with an "
                             "object and its attribute or a dict and its key. "
                             "In this case it was called with obj={}"
                             .format(repr(obj)))
+
+    def _cleanEditables(self):
+        """
+        Make sure there are no dead refs in the editables list
+        """
+        for ref in self._editableChildren:
+            obj = ref()
+            if obj is None:
+                self._editableChildren.remove(ref)
 
     @property
     def currentEditable(self):
@@ -982,7 +1064,8 @@ class Window(object):
         # If this is the first editable obj then make it the current
         if len(self._editableChildren) == 1:
             self._currentEditableRef = eRef
-
+        # Clean editables list
+        self._cleanEditables()
 
     def removeEditable(self, editable):
         # If editable is present, remove it from editables list
@@ -993,10 +1076,19 @@ class Window(object):
                     self.nextEditable()
                 self._editableChildren.remove(ref)
                 return True
+            else:
+                logging.warning(f"Request to remove editable object {editable} could not be completed as weakref "
+                                f"to this object could not be found in window.")
+        # Clean editables list
+        self._cleanEditables()
+
         return False
     
     def nextEditable(self):
         """Moves focus of the cursor to the next editable window"""
+        # Clean editables list
+        self._cleanEditables()
+        # Progress
         if self.currentEditable is None:
             if len(self._editableChildren):
                 self._currentEditableRef = self._editableChildren[0]            
@@ -1017,6 +1109,37 @@ class Window(object):
         psychopy kb event integration.
         """
         Window.backend.dispatchEvents()
+
+    def clearAutoDraw(self):
+        """
+        Remove all autoDraw components, meaning they get autoDraw set to False and are not
+        added to any list (as in .stashAutoDraw)
+        """
+        for thisStim in self._toDraw.copy():
+            # set autoDraw to False
+            thisStim.autoDraw = False
+
+    def stashAutoDraw(self):
+        """
+        Put autoDraw components on 'hold', meaning they get autoDraw set to False but
+        are added to an internal list to be 'released' when .releaseAutoDraw is called.
+        """
+        for thisStim in self._toDraw.copy():
+            # set autoDraw to False
+            thisStim.autoDraw = False
+            # add stim to held list
+            self._heldDraw.append(thisStim)
+
+    def retrieveAutoDraw(self):
+        """
+        Add all stimuli which are on 'hold' back into the autoDraw list, and clear the
+        hold list.
+        """
+        for thisStim in self._heldDraw:
+            # set autoDraw to True
+            thisStim.autoDraw = True
+        # clear list
+        self._heldDraw = []
 
     def flip(self, clearBuffer=True):
         """Flip the front and back buffers after drawing everything for your
@@ -1053,9 +1176,20 @@ class Window(object):
             win.flip(clearBuffer=False)
 
         """
+        # draw message/splash if needed
+        if self._showSplash:
+            self._splashTextbox.draw()
+
         if self._toDraw:
             for thisStim in self._toDraw:
+                # draw
                 thisStim.draw()
+                # draw validation rect if needed
+                if thisStim in self.validators:
+                    self.validators[thisStim].draw()
+                # handle dragging
+                if getattr(thisStim, "draggable", False):
+                    thisStim.doDragging()
         else:
             self.backend.setCurrent()
 
@@ -1084,6 +1218,8 @@ class Window(object):
                 if isinstance(thisObj, weakref.ref):
                     # Solidify weakref if necessary
                     thisObj = thisObj()
+                if thisObj is None:
+                    continue
                 if isinstance(thisObj.autoDraw, (bool, int, float)):
                     # Store whether this editable is on screen
                     editablesOnScreen.append(thisObj.autoDraw)
@@ -1225,6 +1361,14 @@ class Window(object):
 
         # keep the system awake (prevent screen-saver or sleep)
         platform_specific.sendStayAwake()
+
+        # draw background (if present) for next frame
+        if hasattr(self.backgroundImage, "draw"):
+            self.backgroundImage.draw()
+
+        # draw piloting indicator (if piloting) for next frame
+        if self._showPilotingIndicator:
+            self._pilotingIndicator.draw()
 
         #    If self.waitBlanking is True, then return the time that
         # GL.glFinish() returned, set as the 'now' variable. Otherwise
@@ -1400,6 +1544,16 @@ class Window(object):
         """Size of the framebuffer in pixels (w, h)."""
         # Dimensions should match window size unless using a retina display
         return self.backend.frameBufferSize
+
+    @property
+    def windowedSize(self):
+        """Size of the window to use when not fullscreen (w, h)."""
+        return self._windowedSize
+
+    @windowedSize.setter
+    def windowedSize(self, value):
+        """Size of the window to use when not fullscreen (w, h)."""
+        self._windowedSize[:] = value
 
     def getContentScaleFactor(self):
         """Get the scaling factor required for scaling correctly on high-DPI
@@ -1671,7 +1825,9 @@ class Window(object):
         match the dimensions of the viewport.
 
         """
-        self.scissor = self.viewport = self.frameBufferSize
+        # use the framebuffer size here, not the window size (hi-dpi compat)
+        bufferWidth, bufferHeight = self.frameBufferSize
+        self.scissor = self.viewport = [0, 0, bufferWidth, bufferHeight]
 
     @property
     def viewport(self):
@@ -1707,7 +1863,7 @@ class Window(object):
 
     @viewport.setter
     def viewport(self, value):
-        self._viewport = numpy.array(value, numpy.int)
+        self._viewport = numpy.array(value, int)
         GL.glViewport(*self._viewport)
 
     @property
@@ -1732,7 +1888,7 @@ class Window(object):
 
     @scissor.setter
     def scissor(self, value):
-        self._scissor = numpy.array(value, numpy.int)
+        self._scissor = numpy.array(value, int)
         GL.glScissor(*self._scissor)
 
     @property
@@ -2235,6 +2391,93 @@ class Window(object):
         self.movieFrames.append(im)
         return im
 
+    def _getPixels(self, rect=None, buffer='front', includeAlpha=True,
+                   makeLum=False):
+        """Return an array of pixel values from the current window buffer or
+        sub-region.
+
+        Parameters
+        ----------
+        rect : tuple[int], optional
+            The region of the window to capture in pixel coordinates (left,
+            bottom, width, height). If `None`, the whole window is captured.
+        buffer : str, optional
+            Buffer to capture.
+        includeAlpha : bool, optional
+            Include the alpha channel in the returned array. Default is `True`.
+        makeLum : bool, optional
+            Convert the RGB values to luminance values. Values are rounded to
+            the nearest integer. Default is `False`.
+
+        Returns
+        -------
+        ndarray
+            Pixel values as a 3D array of shape (height, width, channels). If
+            `includeAlpha` is `False`, the array will have shape (height, width,
+            3). If `makeLum` is `True`, the array will have shape (height,
+            width).
+
+        Examples
+        --------
+        Get the pixel values of the whole window::
+
+            pix = win._getPixels()
+
+        Get pixel values and convert to luminance and get average::
+
+            pix = win._getPixels(makeLum=True)
+            average = pix.mean()
+
+        """
+        # do the reading of the pixels
+        if buffer == 'back' and self.useFBO:
+            GL.glReadBuffer(GL.GL_COLOR_ATTACHMENT0_EXT)
+        elif buffer == 'back':
+            GL.glReadBuffer(GL.GL_BACK)
+        elif buffer == 'front':
+            if self.useFBO:
+                GL.glBindFramebufferEXT(GL.GL_FRAMEBUFFER_EXT, 0)
+            GL.glReadBuffer(GL.GL_FRONT)
+        else:
+            raise ValueError("Requested read from buffer '{}' but should be "
+                             "'front' or 'back'".format(buffer))
+
+        if rect:
+            # box corners in pix
+            left, bottom, w, h = rect
+        else:
+            left = bottom = 0
+            w, h = self.size
+
+        # get pixel data
+        bufferDat = (GL.GLubyte * (4 * w * h))()
+        GL.glReadPixels(
+            left, bottom, w, h,
+            GL.GL_RGBA,
+            GL.GL_UNSIGNED_BYTE,
+            bufferDat)
+
+        # convert to array
+        toReturn = numpy.frombuffer(bufferDat, dtype=numpy.uint8)
+        toReturn = toReturn.reshape((h, w, 4))
+
+        # rebind front buffer if needed
+        if buffer == 'front' and self.useFBO:
+            GL.glBindFramebufferEXT(GL.GL_FRAMEBUFFER_EXT, self.frameBuffer)
+
+        # if we want the color data without an alpha channel, we need to
+        # convert the data to a numpy array and remove the alpha channel
+        if not includeAlpha:
+            toReturn = toReturn[:, :, :3]  # remove alpha channel
+
+        # convert to luminance if requested
+        if makeLum:
+            coeffs = [0.2989, 0.5870, 0.1140]
+            toReturn = numpy.rint(numpy.dot(toReturn[:, :, :3], coeffs)).astype(
+                numpy.uint8)
+
+        return toReturn
+
     def _getFrame(self, rect=None, buffer='front'):
         """Return the current Window as an image.
         """
@@ -2401,6 +2644,15 @@ class Window(object):
         """Close the window (and reset the Bits++ if necess).
         """
         self._closed = True
+
+        # If iohub is running, inform it to stop using this win id
+        # for mouse events
+        try:
+            if IOHUB_ACTIVE:
+                from psychopy.iohub.client import ioHubConnection
+                ioHubConnection.ACTIVE_CONNECTION.unregisterWindowHandles(self._hw_handle)
+        except Exception:
+            pass
 
         self.backend.close()  # moved here, dereferencing the window prevents
                               # backend specific actions to take place
@@ -2688,6 +2940,88 @@ class Window(object):
     @rgb.setter
     def rgb(self, value):
         self.color = Color(value, 'rgb')
+
+    @attributeSetter
+    def backgroundImage(self, value):
+        """
+        Background image for the window, can be either a visual.ImageStim object or anything which could be passed to
+        visual.ImageStim.image to create one. Will be drawn each time `win.flip()` is called, meaning it is always
+        below all other contents of the window.
+        """
+        if value in (None, "None", "none", ""):
+            # If given None, store so we know not to use a background image
+            self._backgroundImage = None
+            self.__dict__['backgroundImage'] = self._backgroundImage
+            return
+        elif hasattr(value, "draw") and hasattr(value, "win"):
+            # If given a visual object, set its parent window to self and use it
+            value.win = self
+            self._backgroundImage = value
+        else:
+            # Otherwise, try to make an image from value (start off as if backgroundFit was None)
+            self._backgroundImage = image.ImageStim(self, image=value, size=None, pos=(0, 0))
+
+        # Set background fit again now that we have an image
+        if hasattr(self, "_backgroundFit"):
+            self.backgroundFit = self._backgroundFit
+
+        self.__dict__['backgroundImage'] = self._backgroundImage
+
+    @attributeSetter
+    def backgroundFit(self, value):
+        """
+        How should the background image of this window fit? Options are:
+
+        None, "None", "none"
+            No scaling is applied, image is present at its pixel size unaltered.
+        "cover"
+            Image is scaled such that it covers the whole screen without changing its aspect ratio. In other words,
+            both dimensions are evenly scaled such that its SHORTEST dimension matches the window's LONGEST dimension.
+        "contain"
+            Image is scaled such that it is contained within the screen without changing its aspect ratio. In other
+            words, both dimensions are evenly scaled such that its LONGEST dimension matches the window's SHORTEST
+            dimension.
+        "scaleDown", "scale-down", "scaledown"
+            If image is bigger than the window along any dimension, it will behave as if backgroundFit were "contain".
+            Otherwise, it will behave as if backgroundFit were None.
+        """
+        self._backgroundFit = value
+
+        # Skip if no background image
+        if (not hasattr(self, "_backgroundImage")) or (self._backgroundImage is None):
+            self.__dict__['backgroundFit'] = self._backgroundFit
+            return
+
+        # If value is scaleDown or alias, set to None or "contain" based on relative size
+        if value in ("scaleDown", "scale-down", "scaledown"):
+            overflow = numpy.asarray(self._backgroundImage._origSize) > numpy.asarray(self.size)
+            if overflow.any():
+                value = "contain"
+            else:
+                value = None
+
+        if value in (None, "None", "none"):
+            # If value is None, don't change the backgroundImage at all
+            pass
+        elif value == "fill":
+            # If value is fill, make backgroundImage fill screen
+            self._backgroundImage.units = "norm"
+            self._backgroundImage.size = (2, 2)
+            self._backgroundImage.pos = (0, 0)
+        if value in ("contain", "cover"):
+            # If value is contain or cover, set one dimension to fill screen and the other to maintain ratio
+            ratios = numpy.asarray(self._backgroundImage._origSize) / numpy.asarray(self.size)
+            if value == "cover":
+                i = ratios.argmin()
+            else:
+                i = ratios.argmax()
+            size = [None, None]
+            size[i] = 2
+            self._backgroundImage.units = "norm"
+            self._backgroundImage.size = size
+            self._backgroundImage.pos = (0, 0)
+
+        self.__dict__['backgroundFit'] = self._backgroundFit
 
     def _setupGamma(self, gammaVal):
         """A private method to work out how to handle gamma for this Window
@@ -3001,7 +3335,12 @@ class Window(object):
         GL.glClear(GL.GL_DEPTH_BUFFER_BIT)
         return True
 
-    @attributeSetter
+    @property
+    def mouseVisible(self):
+        """Returns the visibility of the mouse cursor."""
+        return self.backend.mouseVisible
+
+    @mouseVisible.setter
     def mouseVisible(self, visibility):
         """Sets the visibility of the mouse cursor.
 
@@ -3015,7 +3354,6 @@ class Window(object):
 
         """
         self.backend.setMouseVisibility(visibility)
-        self.__dict__['mouseVisible'] = visibility
 
     def setMouseVisible(self, visibility, log=None):
         """Usually you can use 'stim.attribute = value' syntax instead,
@@ -3051,8 +3389,68 @@ class Window(object):
         if hasattr(self.backend, "setMouseType"):
             self.backend.setMouseType(name)
 
+    def showPilotingIndicator(self):
+        """
+        Show the visual indicator which shows we are in piloting mode.
+        """
+        # if we haven't made the indicator yet, do that now
+        if self._pilotingIndicator is None:
+            self._pilotingIndicator = TextBox2(
+                self, text=_translate("PILOTING: Switch to run mode before testing."),
+                letterHeight=0.1, alignment="bottom left",
+                units="norm", size=(2, 2),
+                borderColor="#EC9703", color="#EC9703", fillColor="transparent",
+                borderWidth=20,
+                autoDraw=False
+            )
+        # mark it as to be shown
+        self._showPilotingIndicator = True
+
+    def hidePilotingIndicator(self):
+        """
+        Hide the visual indicator which shows we are in piloting mode.
+        """
+        # mark indicator as to be hidden
+        self._showPilotingIndicator = False
+
+    def showMessage(self, msg):
+        """Show a message in the window. This can be used to show information
+        to the participant.
+
+        This creates a TextBox2 object that is displayed in the window. The 
+        text can be updated by calling this method again with a new message. 
+        The updated text will appear the next time `draw()` is called.
+
+        Parameters
+        ----------
+        msg : str or None   
+            Message text to display. If None, then any existing message is 
+            removed.
+
+        """
+        if msg is None:
+            self.hideMessage()
+        else:
+            self._showSplash = True
+        
+        if self._splashTextbox is None:  # create the textbox
+            self._splashTextbox = TextBox2(
+                self, text=msg,
+                units="norm", size=(2, 2), alignment="center",  # full screen and centred
+                letterHeight=0.1,  # font size relative to window
+                autoDraw=False
+            )
+        else:
+            self._splashTextbox.text = str(msg)  # update the text
+        # set text color to contrast with background
+        self._splashTextbox.color = self._color.getReadable(contrast=1)
+
+    def hideMessage(self):
+        """Remove any message that is currently being displayed."""
+        self._showSplash = False
+
     def getActualFrameRate(self, nIdentical=10, nMaxFrames=100,
-                           nWarmUpFrames=10, threshold=1):
+                           nWarmUpFrames=10, threshold=1, infoMsg=None):
         """Measures the actual frames-per-second (FPS) for the screen.
 
         This is done by waiting (for a max of `nMaxFrames`) until
@@ -3071,7 +3469,7 @@ class Window(object):
             The number of frames to display before starting the test
             (this is in place to allow the system to settle after opening
             the `Window` for the first time.
-        threshold : int, optional
+        threshold : int or float, optional
             The threshold for the std deviation (in ms) before the set
             are considered a match.
 
@@ -3083,36 +3481,64 @@ class Window(object):
 
         """
         if nIdentical > nMaxFrames:
-            raise ValueError('nIdentical must be equal to or '
-                             'less than nMaxFrames')
+            raise ValueError(
+                'Parameter `nIdentical` must be equal to or less than '
+                '`nMaxFrames`')
+
+        screen = self.screen
+        name = self.name
+
+        if infoMsg is None:
+            infoMsg = "Attempting to measure frame rate of screen, please wait ..."
+
+        self.showMessage(infoMsg)
+
+        # log that we're measuring the frame rate now
+        if self.autoLog:
+            msg = "{}: Attempting to measure frame rate of screen ({:d}) ..."
+            logging.exp(msg.format(name, screen))
+
+        # Disable `recordFrameIntervals` prior to the warmup as we expect to see
+        # some instability here.
         recordFrmIntsOrig = self.recordFrameIntervals
-        # run warm-ups
         self.recordFrameIntervals = False
+
+        # warm-up, allow the system to settle a bit before measuring frames
         for frameN in range(nWarmUpFrames):
             self.flip()
+
         # run test frames
-        self.recordFrameIntervals = True
+        self.recordFrameIntervals = True  # record intervals for actual test
+        threshSecs = threshold / 1000.0  # must be in seconds
         for frameN in range(nMaxFrames):
             self.flip()
-            if (len(self.frameIntervals) >= nIdentical and
-                    (numpy.std(self.frameIntervals[-nIdentical:]) <
-                     (threshold / 1000.0))):
-                rate = 1.0 / numpy.mean(self.frameIntervals[-nIdentical:])
-                if self.screen is None:
-                    scrStr = ""
-                else:
-                    scrStr = " (%i)" % self.screen
+            recentFrames = self.frameIntervals[-nIdentical:]
+            nIntervals = len(self.frameIntervals)
+            if len(recentFrames) < 3:
+                continue  # no need to check variance yet
+            recentFramesStd = numpy.std(recentFrames)  # compute variability
+            if nIntervals >= nIdentical and recentFramesStd < threshSecs:
+                # average duration of recent frames
+                period = numpy.mean(recentFrames)  # log this too?
+                rate = 1.0 / period  # compute frame rate in Hz
                 if self.autoLog:
-                    msg = 'Screen%s actual frame rate measured at %.2f'
-                    logging.debug(msg % (scrStr, rate))
+                    scrStr = "" if screen is None else " (%i)" % screen
+                    msg = "Screen{} actual frame rate measured at {:.2f}Hz"
+                    logging.exp(msg.format(scrStr, rate))
+
                 self.recordFrameIntervals = recordFrmIntsOrig
                 self.frameIntervals = []
+                self.hideMessage()  # remove the message
                 return rate
-        # if we got here we reached end of maxFrames with no consistent value
-        msg = ("Couldn't measure a consistent frame rate.\n"
+
+        self.hideMessage()  # remove the message
+
+        # if we get here we reached end of `maxFrames` with no consistent value
+        msg = ("Couldn't measure a consistent frame rate!\n"
                "  - Is your graphics card set to sync to vertical blank?\n"
                "  - Are you running other processes on your computer?\n")
         logging.warning(msg)
+
         return None
 
     def getMsPerFrame(self, nFrames=60, showVisual=False, msg='', msDelay=0.):
@@ -3286,4 +3712,3 @@ def getMsPerFrame(myWin, nFrames=60, showVisual=False, msg='', msDelay=0.):
     """
     return myWin.getMsPerFrame(nFrames=60, showVisual=showVisual, msg=msg,
                                msDelay=0.)
-

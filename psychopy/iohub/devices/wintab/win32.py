@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-# Part of the psychopy.iohub library.
-# Copyright (C) 2012-2016 iSolver Software Solutions
+# Part of the PsychoPy library
+# Copyright (C) 2012-2020 iSolver Software Solutions (C) 2021 Open Science Tools Ltd.
 # Distributed under the terms of the GNU General Public License (GPL).
 
 # Initial file based on pyglet.libs.win32
@@ -409,7 +409,7 @@ def wtinfo_bool(category, index):
     return bool(buffer.value)
 
 
-class Win32Wintab(object):
+class Win32Wintab:
     '''High-level interface to tablet devices.
 
     Unlike other devices, tablets must be opened for a specific window,
@@ -673,7 +673,7 @@ class Win32WintabCanvas(EventDispatcher):
             self._current_cursor = None
 
 
-class Win32WintabCursor(object):
+class Win32WintabCursor:
 
     def __init__(self, device, index):
         self.device = device

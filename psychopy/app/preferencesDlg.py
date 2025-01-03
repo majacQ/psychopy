@@ -1,10 +1,9 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-from __future__ import absolute_import, print_function
-
 import json
-from builtins import str
+import sys
+from pathlib import Path
+
 import wx
 import wx.propgrid as pg
 import wx.py
@@ -12,168 +11,15 @@ import platform
 import re
 import os
 
+from psychopy.app.themes import icons
 from . import dialogs
 from psychopy import localization, prefs
 from psychopy.localization import _translate
-from pkg_resources import parse_version
+from packaging.version import Version
 from psychopy import sound
 from psychopy.app.utils import getSystemFonts
 import collections
 
-# labels mappings for display:
-_localized = {
-    # category labels
-    'General': _translate('General'),
-    'Application': _translate('Application'),
-    'Key Bindings': _translate('Key Bindings'),
-    'Hardware': _translate('Hardware'),
-    'Connections': _translate('Connections'),
-    # section labels
-    'general': _translate('general'),
-    'app': _translate('app'),
-    'builder': "Builder",  # not localized
-    'coder': "Coder",  # not localized
-    'runner': "Runner",  # not localized
-    'hardware': _translate('Hardware'),
-    'connections': _translate('Connections'), # not 'connections'
-    'keyBindings': _translate('Key Bindings'), # not 'keyBindings'
-    # pref labels in General section
-    'winType': _translate("window type"),
-    'units': _translate("units"),
-    'fullscr': _translate("full-screen"),
-    'allowGUI': _translate("allow GUI"),
-    'paths': _translate('paths'),
-    'flac': _translate('flac audio compression'),
-    'shutdownKey': _translate("shutdown key"),
-    'shutdownKeyModifiers': _translate("shutdown key modifier keys"),
-    'gammaErrorPolicy': _translate("gammaErrorPolicy"),
-    'startUpPlugins': _translate("start up plugins"),
-    # pref labels in App section
-    'showStartupTips': _translate("show start-up tips"),
-    'defaultView': _translate("default view"),
-    'resetPrefs': _translate('reset preferences'),
-    'autoSavePrefs': _translate('auto-save prefs'),
-    'debugMode': _translate('debug mode'),
-    'locale': _translate('locale'),
-    'errorDialog': _translate('error dialog'),
-    'theme': _translate('theme'),
-    # pref labels in Builder section
-    'reloadPrevExp': _translate('reload previous exp'),
-    'codeComponentLanguage': _translate('Code component language'),
-    'unclutteredNamespace': _translate('uncluttered namespace'),
-    'componentsFolders': _translate('components folders'),
-    'hiddenComponents': _translate('hidden components'),
-    'unpackedDemosDir': _translate('unpacked demos dir'),
-    'savedDataFolder': _translate('saved data folder'),
-    'builderLayout': _translate('Builder layout'),
-    'alwaysShowReadme': _translate('always show readme'),
-    'maxFavorites': _translate('max favorites'),
-    # pref labels in Coder section
-    'readonly': _translate('read-only'),
-    'outputFont': _translate('output font'),
-    'codeFont': _translate('code font'),
-    'outputFontSize': _translate('output font size'),
-    'codeFontSize': _translate('code font size'),
-    'lineSpacing': _translate('lineSpacing'),
-    'edgeGuideColumn': _translate('edgeGuideColumn'),
-    'showSourceAsst': _translate('show source asst'),
-    'showOutput': _translate('show output'),
-    'autocomplete': _translate('auto complete'),
-    'reloadPrevFiles': _translate('reload previous files'),
-    'preferredShell': _translate('preferred shell'),
-    # pref labels in KeyBindings section
-    'open': _translate('open'),
-    'new': _translate('new'),
-    'save': _translate('save'),
-    'saveAs': _translate('save as'),
-    'print': _translate('print'),
-    'close': _translate('close'),
-    'quit': _translate('quit'),
-    'preferences': _translate('preferences'),
-    'exportHTML': _translate('export HTML'),
-    'cut': _translate('cut'),
-    'copy': _translate('copy'),
-    'paste': _translate('paste'),
-    'duplicate': _translate('duplicate'),
-    'indent': _translate('indent'),
-    'dedent': _translate('dedent'),
-    'smartIndent': _translate('smart indent'),
-    'find': _translate('find'),
-    'findAgain': _translate('find again'),
-    'undo': _translate('undo'),
-    'redo': _translate('redo'),
-    'comment': _translate('comment'),
-    'uncomment': _translate('uncomment'),
-    'toggle comment': _translate('toggle comment'),
-    'fold': _translate('fold'),
-    'enlargeFont': _translate('enlarge Font'),
-    'shrinkFont': _translate('shrink Font'),
-    'analyseCode': _translate('analyze code'),
-    'compileScript': _translate('compile script'),
-    'runScript': _translate('run script'),
-    'runnerScript': _translate('runner script'),
-    'stopScript': _translate('stop script'),
-    'toggleWhitespace': _translate('toggle whitespace'),
-    'toggleEOLs': _translate('toggle EOLs'),
-    'toggleIndentGuides': _translate('toggle indent guides'),
-    'newRoutine': _translate('new Routine'),
-    'copyRoutine': _translate('copy Routine'),
-    'pasteRoutine': _translate('paste Routine'),
-    'pasteCompon': _translate('paste Component'),
-    'toggleOutputPanel': _translate('toggle output panel'),
-    'renameRoutine': _translate('rename Routine'),
-    'cycleWindows': _translate('cycle windows'),
-    'largerFlow': _translate('larger Flow'),
-    'smallerFlow': _translate('smaller Flow'),
-    'largerRoutine': _translate('larger routine'),
-    'smallerRoutine': _translate('smaller routine'),
-    'toggleReadme': _translate('toggle readme'),
-    'pavlovia_logIn': _translate('login to pavlovia'),
-    'OSF_logIn': _translate('login to OSF'),
-    'projectsSync': _translate('sync projects'),
-    'projectsFind': _translate('find projects'),
-    'projectsOpen': _translate('open projects'),
-    'projectsNew': _translate('new projects'),
-    # pref labels in Hardware section
-    'audioLib': _translate("audio library"),
-    'audioLatencyMode': _translate("audio latency mode"),
-    'audioDriver': _translate("audio driver"),
-    'audioDevice': _translate("audio device"),
-    'parallelPorts': _translate("parallel ports"),
-    'qmixConfiguration': _translate("Qmix configuration"),
-    'highDPI': _translate('Try to support display high DPI'),
-    # pref labels in Connections section
-    'proxy': _translate('proxy'),
-    'autoProxy': _translate('auto-proxy'),
-    'allowUsageStats': _translate('allow usage stats'),
-    'checkForUpdates': _translate('check for updates'),
-    'timeout': _translate('timeout'),
-    # pref wxChoice lists:
-    'all': _translate('Builder, Coder and Runner'),
-    'keep': _translate('same as in the file'),  # line endings
-    'abort': _translate('abort'), # gammaErrorPolicy
-    'warn': _translate('warn'), # gammaErrorPolicy
-    # not translated:
-    'pix': 'pix',
-    'deg': 'deg',
-    'cm': 'cm',
-    'norm': 'norm',
-    'height': 'height',
-    'pyshell': 'pyshell',
-    'iPython': 'iPython',
-    # obsolete labels
-    'largeIcons': _translate("large icons"),
-    'darkMode': _translate("dark mode"),
-    'highDPI': _translate('highDPI'),
-    'commentFont': _translate('comment font'),
-    'switchToBuilder': _translate('switch to Builder'),
-    'switchToCoder': _translate('switch to Coder'),
-    'switchToRunner': _translate('switch to Runner'),
-    'projectsLogIn': _translate('login to projects'),
-    'useRunner': _translate("use Runner"),
-}
-# add pre-translated names-of-langauges, for display in locale pref:
-_localized.update(localization.locname)
 
 audioLatencyLabels = {0: _translate('Latency not important'),
                       1: _translate('Share low-latency driver'),
@@ -192,26 +38,38 @@ class PrefPropGrid(wx.Panel):
             self, parent, id=id, pos=pos, size=size, style=style, name=name)
         bSizer1 = wx.BoxSizer(wx.HORIZONTAL)
         self.app = wx.GetApp()
-
+        # make splitter so panels are resizable
+        self.splitter = wx.SplitterWindow(self)
+        bSizer1.Add(self.splitter, proportion=1, border=6, flag=wx.EXPAND | wx.ALL)
+        # tabs panel
         self.lstPrefPages = wx.ListCtrl(
-            self, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize,
-            wx.LC_ALIGN_TOP | wx.LC_ICON | wx.LC_SINGLE_SEL)
-        bSizer1.Add(self.lstPrefPages, 0,
-                    wx.BOTTOM | wx.EXPAND | wx.LEFT | wx.TOP, 5)
-
+            self.splitter, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize,
+            wx.LC_ALIGN_TOP | wx.LC_LIST | wx.LC_SINGLE_SEL)
+        # images for tabs panel
         prefsImageSize = wx.Size(48, 48)
         self.prefsIndex = 0
         self.prefsImages = wx.ImageList(
             prefsImageSize.GetWidth(), prefsImageSize.GetHeight())
-        self.lstPrefPages.AssignImageList(self.prefsImages, wx.IMAGE_LIST_NORMAL)
-
+        self.lstPrefPages.AssignImageList(self.prefsImages, wx.IMAGE_LIST_SMALL)
+        # property grid
         self.proPrefs = pg.PropertyGridManager(
-            self, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize,
+            self.splitter, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize,
             wx.propgrid.PGMAN_DEFAULT_STYLE | wx.propgrid.PG_BOLD_MODIFIED |
             wx.propgrid.PG_DESCRIPTION | wx.TAB_TRAVERSAL)
         self.proPrefs.SetExtraStyle(wx.propgrid.PG_EX_MODE_BUTTONS)
+        # assign panels to splitter
+        self.splitter.SplitVertically(
+            self.lstPrefPages, self.proPrefs
+        )
+        # move sash to min extent of page ctrls
+        self.splitter.SetMinimumPaneSize(prefsImageSize[0] + 2)
 
-        bSizer1.Add(self.proPrefs, 1, wx.ALL | wx.EXPAND, 5)
+        if sys.platform == 'win32':
+            # works on windows only since it has a column
+            self.splitter.SetSashPosition(self.lstPrefPages.GetColumnWidth(0))
+        else:
+            # size that make sense on other platforms
+            self.splitter.SetSashPosition(150)
 
         self.SetSizer(bSizer1)
         self.Layout()
@@ -255,7 +113,7 @@ class PrefPropGrid(wx.Panel):
             if s not in self.sections.keys():
                 self.sections[s] = dict()
 
-        nbBitmap = self.app.iconCache.getBitmap(bitmap)
+        nbBitmap = icons.ButtonIcon(stem=bitmap, size=(48, 48)).bitmap
         if nbBitmap.IsOk():
             self.prefsImages.Add(nbBitmap)
 
@@ -263,7 +121,7 @@ class PrefPropGrid(wx.Panel):
                                     list(sections))
         self.pageNames[name] = self.pageIdx
         self.lstPrefPages.InsertItem(
-            self.lstPrefPages.GetItemCount(), _localized[label], self.pageIdx)
+            self.lstPrefPages.GetItemCount(), label, self.pageIdx)
 
         self.pageIdx += 1
 
@@ -325,13 +183,14 @@ class PrefPropGrid(wx.Panel):
         if section not in self.sections.keys():
             self.sections[section] = []
 
-        self.sections[section].update(
-            {name: wx.propgrid.FileProperty(label, name, value)})
+        prop = wx.propgrid.FileProperty(label, name, value)
+        self.sections[section].update({name: prop})
+        prop.SetAttribute(wx.propgrid.PG_FILE_SHOW_FULL_PATH, True)
 
         self.helpText[name] = helpText
 
     def addDirItem(self, section, label=wx.propgrid.PG_LABEL,
-                    name=wx.propgrid.PG_LABEL, value='', helpText=""):
+                   name=wx.propgrid.PG_LABEL, value='', helpText=""):
         if section not in self.sections.keys():
             self.sections[section] = dict()
 
@@ -384,8 +243,12 @@ class PrefPropGrid(wx.Panel):
             pagePtr.Clear()
 
             for s in sections:
-                _ = pagePtr.Append(pg.PropertyCategory(_localized[s], s))
+                _ = pagePtr.Append(pg.PropertyCategory(s, s))
                 for name, prop in self.sections[s].items():
+                    if name in prefs.legacy:
+                        # If this is included in the config file only for legacy, don't show it
+                        continue
+
                     item = pagePtr.Append(prop)
 
                     # set the appropriate control to edit the attribute
@@ -470,19 +333,40 @@ class PreferencesDlg(wx.Dialog):
 
         # add property pages to the manager
         self.proPrefs.addPage(
-            'General', 'general', ['general'],
-            'preferences-general48.png')
+            label=_translate('General'),
+            name='general',
+            sections=['general'],
+            bitmap='preferences-general')
         self.proPrefs.addPage(
-            'Application', 'app', ['app', 'builder', 'coder'],
-            'preferences-app48.png')
+            label=_translate('Application'),
+            name='app',
+            sections=['app', 'builder', 'coder'],
+            bitmap='preferences-app'
+        )
         self.proPrefs.addPage(
-            'Key Bindings', 'keyBindings', ['keyBindings'],
-            'preferences-keyboard48.png')
+            label=_translate('Pilot mode'),
+            name='piloting',
+            sections=['piloting'],
+            bitmap='preferences-pilot'
+        )
         self.proPrefs.addPage(
-            'Hardware', 'hardware', ['hardware'], 'preferences-hardware48.png')
+            label=_translate('Key Bindings'),
+            name='keyBindings',
+            sections=['keyBindings'],
+            bitmap='preferences-keyboard'
+        )
         self.proPrefs.addPage(
-            'Connections', 'connections', ['connections'],
-            'preferences-conn48.png')
+            label=_translate('Hardware'),
+            name='hardware',
+            sections=['hardware'],
+            bitmap='preferences-hardware'
+        )
+        self.proPrefs.addPage(
+            label=_translate('Connections'),
+            name='connections',
+            sections=['connections'],
+            bitmap='preferences-conn'
+        )
         self.proPrefs.populateGrid()
 
         sbPrefs.Add(self.proPrefs, 1, wx.EXPAND)
@@ -493,19 +377,30 @@ class PreferencesDlg(wx.Dialog):
         sbPrefs.Add(self.stlMain, 0, wx.EXPAND | wx.ALL, 5)
 
         # dialog controls, have builtin localization
-        sdbControls = wx.StdDialogButtonSizer()
-        self.sdbControlsHelp = wx.Button(self.pnlMain, wx.ID_HELP)
-        sdbControls.AddButton(self.sdbControlsHelp)
-        self.sdbControlsApply = wx.Button(self.pnlMain, wx.ID_APPLY)
-        sdbControls.AddButton(self.sdbControlsApply)
-        self.sdbControlsOK = wx.Button(self.pnlMain, wx.ID_OK)
-        sdbControls.AddButton(self.sdbControlsOK)
-        self.sdbControlsCancel = wx.Button(self.pnlMain, wx.ID_CANCEL)
-        sdbControls.AddButton(self.sdbControlsCancel)
-
-        sdbControls.Realize()
-
-        sbPrefs.Add(sdbControls, 0, wx.ALL | wx.ALIGN_RIGHT, 0)
+        sdbControls = wx.BoxSizer(wx.HORIZONTAL)
+        self.sdbControlsHelp = wx.Button(self.pnlMain, wx.ID_HELP, _translate(" Help "))
+        sdbControls.Add(self.sdbControlsHelp, 0,
+                        wx.LEFT | wx.ALL | wx.ALIGN_CENTER_VERTICAL,
+                        border=3)
+        sdbControls.AddStretchSpacer()
+        # Add Okay and Cancel buttons
+        self.sdbControlsApply = wx.Button(self.pnlMain, wx.ID_APPLY, _translate(" Apply "))
+        self.sdbControlsOK = wx.Button(self.pnlMain, wx.ID_OK, _translate(" OK "))
+        self.sdbControlsCancel = wx.Button(self.pnlMain, wx.ID_CANCEL, _translate(" Cancel "))
+        if sys.platform == "win32":
+            btns = [self.sdbControlsOK, self.sdbControlsApply, self.sdbControlsCancel]
+        else:
+            btns = [self.sdbControlsCancel, self.sdbControlsApply, self.sdbControlsOK]
+        sdbControls.Add(btns[0], 0,
+                        wx.ALL | wx.RIGHT | wx.ALIGN_CENTER_VERTICAL,
+                        border=3)
+        sdbControls.Add(btns[1], 0,
+                        wx.ALL | wx.RIGHT | wx.ALIGN_CENTER_VERTICAL,
+                        border=3)
+        sdbControls.Add(btns[2], 0,
+                        wx.ALL | wx.RIGHT | wx.ALIGN_CENTER_VERTICAL,
+                        border=3)
+        sbPrefs.Add(sdbControls, flag=wx.ALL | wx.EXPAND, border=3)
 
         self.pnlMain.SetSizer(sbPrefs)
         self.pnlMain.Layout()
@@ -529,27 +424,18 @@ class PreferencesDlg(wx.Dialog):
         # valid themes
         themePath = self.GetTopLevelParent().app.prefs.paths['themes']
         self.themeList = []
-        for themeFile in os.listdir(themePath):
-            try:
-                # Load theme from json file
-                with open(os.path.join(themePath, themeFile), "rb") as fp:
-                    theme = json.load(fp)
-                # Add themes to list only if min spec is defined
-                base = theme['base']
-                if all(key in base for key in ['bg', 'fg', 'font']):
-                    self.themeList += [themeFile.replace('.json', '')]
-            except:
-                pass
+        for file in Path(themePath).glob("*.json"):
+            self.themeList.append(file.stem)
 
         # get sound devices for "audioDevice" property
         try:
             devnames = sorted(sound.getDevices('output'))
-        except (ValueError, OSError, ImportError):
+        except (ValueError, OSError, ImportError, AttributeError):
             devnames = []
 
         audioConf = self.prefsCfg['hardware']['audioDevice']
         self.audioDevDefault = audioConf \
-            if type(audioConf) != list else list(audioConf)
+            if type(audioConf) is list else list(audioConf)
         self.audioDevNames = [
             dev.replace('\r\n', '') for dev in devnames
             if dev != self.audioDevDefault]
@@ -582,10 +468,7 @@ class PreferencesDlg(wx.Dialog):
                         thisPref = thisPref.replace('Ctrl+', 'Cmd+')
 
                 # can we translate this pref?
-                try:
-                    pLabel = _localized[prefName]
-                except Exception:
-                    pLabel = prefName
+                pLabel = prefName
 
                 # get tooltips from comment lines from the spec, as parsed by
                 # configobj
@@ -596,7 +479,7 @@ class PreferencesDlg(wx.Dialog):
                     hint = hints[-1].lstrip().lstrip('#').lstrip()
                     helpText = _translate(hint)
 
-                if type(thisPref) == bool:
+                if type(thisPref) is bool:
                     # only True or False - use a checkbox
                     self.proPrefs.addBoolItem(
                         sectionName, pLabel, prefName, thisPref,
@@ -608,11 +491,12 @@ class PreferencesDlg(wx.Dialog):
                         default = self.fontList.index(thisPref)
                     except ValueError:
                         default = 0
+                    labels = [_translate(font) for font in self.fontList]
                     self.proPrefs.addEnumItem(
                             sectionName,
                             pLabel,
                             prefName,
-                            labels=self.fontList,
+                            labels=labels,
                             values=[i for i in range(len(self.fontList))],
                             value=default, helpText=helpText)
                 elif prefName in ('theme',):
@@ -637,8 +521,8 @@ class PreferencesDlg(wx.Dialog):
                         # set default locale ''
                         default = locales.index('')
                     # '' must be appended after other labels are translated
-                    labels = [_translate('system locale')] + [_localized[i] 
-                                     for i in self.app.localization.available]
+                    labels = self.app.localization.available.copy()
+                    labels.insert(0, _translate('system locale'))
                     self.proPrefs.addEnumItem(
                             sectionName,
                             pLabel,
@@ -652,10 +536,22 @@ class PreferencesDlg(wx.Dialog):
                         sectionName, pLabel, prefName, thisPref,
                         helpText=helpText)
                 # single file
-                elif prefName in ('flac',):
+                elif prefName in ('flac', 'appKeyGoogleCloud',):
                     self.proPrefs.addFileItem(
                         sectionName, pLabel, prefName, thisPref,
                         helpText=helpText)
+                # window backend items
+                elif prefName == 'winType':
+                    from psychopy.visual.backends import getAvailableWinTypes
+                    labels = getAvailableWinTypes()
+                    default = labels.index('pyglet')  # is always included
+                    self.proPrefs.addEnumItem(
+                            sectionName,
+                            pLabel,
+                            prefName,
+                            labels=labels,
+                            values=[i for i in range(len(labels))],
+                            value=default, helpText=helpText)
                 # # audio latency mode for the PTB driver
                 elif prefName == 'audioLatencyMode':
                     # get the labels from above
@@ -693,7 +589,7 @@ class PreferencesDlg(wx.Dialog):
                         options = self.audioDevNames
                         try:
                             default = self.audioDevNames.index(
-                                self.audioDevDefault)
+                                self.audioDevDefault[0])
                         except ValueError:
                             default = 0
                     else:
@@ -714,10 +610,7 @@ class PreferencesDlg(wx.Dialog):
 
                     labels = []  # display only
                     for opt in options:
-                        try:
-                            labels.append(_localized[opt])
-                        except Exception:
-                            labels.append(opt)
+                        labels.append(opt)
 
                     self.proPrefs.addEnumItem(
                             sectionName,
@@ -730,7 +623,7 @@ class PreferencesDlg(wx.Dialog):
                         item = self.proPrefs.sections[sectionName][prefName]
                         for i in range(len(item.GetChoices())):
                             choice = item.GetChoices()[i]
-                            icon = self.app.iconCache.getBitmap(choice.Text)
+                            icon = icons.ButtonIcon(stem=choice.Text).bitmap
                             choice.SetBitmap(icon)
                 # # lists are given a property that can edit and reorder items
                 elif thisSpec.startswith('list'):  # list
@@ -768,12 +661,11 @@ class PreferencesDlg(wx.Dialog):
                         self.fontList[thisPref]
                     continue
                 if prefName in ('theme',):
-                    self.prefsCfg[sectionName][prefName] = \
-                        self.themeList[thisPref]
+                    self.app.theme = self.prefsCfg[sectionName][prefName] = self.themeList[thisPref]
                     continue
                 elif prefName == 'audioDevice':
-                    self.prefsCfg[sectionName][prefName] = \
-                        self.audioDevNames[thisPref]
+                    self.audioDevDefault = [self.audioDevNames[thisPref]]
+                    self.prefsCfg[sectionName][prefName] = self.audioDevDefault
                     continue
                 elif prefName == 'locale':
                     # '' corresponds to system locale
@@ -803,18 +695,14 @@ class PreferencesDlg(wx.Dialog):
                     try:
                         # if thisPref is not a null string, do eval() to get a
                         # list.
-                        if thisPref == '' or type(thisPref) == list:
+                        if thisPref == '' or type(thisPref) is list:
                             newVal = thisPref
                         else:
                             newVal = eval(thisPref)
                     except Exception:
                         # if eval() failed, show warning dialog and return
-                        try:
-                            pLabel = _localized[prefName]
-                            sLabel = _localized[sectionName]
-                        except Exception:
-                            pLabel = prefName
-                            sLabel = sectionName
+                        pLabel = prefName
+                        sLabel = sectionName
                         txt = _translate(
                             'Invalid value in "%(pref)s" ("%(section)s" Tab)')
                         msg = txt % {'pref': pLabel, 'section': sLabel}
@@ -825,7 +713,7 @@ class PreferencesDlg(wx.Dialog):
                                                         title=title)
                         warnDlg.ShowModal()
                         return
-                    if type(newVal) != list:
+                    if type(newVal) is not list:
                         self.prefsCfg[sectionName][prefName] = [newVal]
                     else:
                         self.prefsCfg[sectionName][prefName] = newVal
@@ -842,8 +730,11 @@ class PreferencesDlg(wx.Dialog):
         # > sure, why not? - mdc
         self.populatePrefs()
 
+        # Update Builder window if needed
+        if self.app.builder:
+            self.app.builder.updateAllViews()
+
         # after validation, update the UI
-        self.app.theme = self.app.theme
         self.updateFramesUI()
 
     def updateFramesUI(self):
@@ -859,6 +750,10 @@ class PreferencesDlg(wx.Dialog):
                 for ii in range(frame.shelf.GetPageCount()):
                     doc = frame.shelf.GetPage(ii)
                     doc.theme = prefs.app['theme']
+
+                # apply console font, not handled by theme system ATM
+                if hasattr(frame, 'shell'):
+                    frame.shell.setFonts()
 
     def OnApplyClicked(self, event):
         """Apply button clicked, this makes changes to the UI without leaving
@@ -886,7 +781,7 @@ class PreferencesDlg(wx.Dialog):
 
 if __name__ == '__main__':
     from psychopy import preferences
-    if parse_version(wx.__version__) < parse_version('2.9'):
+    if Version(wx.__version__) < Version('2.9'):
         app = wx.PySimpleApp()
     else:
         app = wx.App(False)

@@ -23,7 +23,7 @@ Parameters
 ~~~~~~~~~~~~
 
 Name : string
-    Everything in a PsychoPy experiment needs a unique name. The name should contain only
+    Everything in a |PsychoPy| experiment needs a unique name. The name should contain only
     letters, numbers and underscores (no punctuation marks or spaces).
 
 Start :
@@ -45,5 +45,7 @@ marker value : int
     The value assigned to this marker
 
 stop marker : bool
-    Whether or not this is a stop marker
-
+    Whether or not this is a stop marker.  Note: stop markers were designed for relatively
+    long intervals (of the order of one second).  If you wish to mark short intervals
+    it is safer to send two instance markers and label them appropriately so that you can
+    create the intervals in post processing.

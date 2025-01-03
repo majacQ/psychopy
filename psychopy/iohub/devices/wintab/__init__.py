@@ -1,13 +1,8 @@
 # -*- coding: utf-8 -*-
-# Part of the psychopy.iohub library.
-# Copyright (C) 2012-2016 iSolver Software Solutions
+# Part of the PsychoPy library
+# Copyright (C) 2012-2020 iSolver Software Solutions (C) 2021 Open Science Tools Ltd.
 # Distributed under the terms of the GNU General Public License (GPL).
 
-#
-# TODO List
-#
-#   2) Check for missing serial numbers in PACKET evt stream.
-#
 _is_epydoc = False
 
 # Pen digitizers /tablets that support Wintab API
@@ -20,7 +15,7 @@ import copy
 from psychopy import platform_specific
 _sendStayAwake = platform_specific.sendStayAwake
 
-class SimulatedWinTabPacket(object):
+class SimulatedWinTabPacket:
     _next_pkt_id = 1
     def __init__(self, time, x, y, press, buttons=0):
         self.pkTime=time*1000.0
@@ -32,7 +27,7 @@ class SimulatedWinTabPacket(object):
         self.pkZ = 0                 
         self.pkNormalPressure=press          #('pressure',N.uint32),
         
-        class Orientation(object):
+        class Orientation:
             def __init__(self):
                 self.orAzimuth=0         #('orient_azimuth',N.int32),
                 self.orAltitude=0        #('orient_altitude;',N.int32),

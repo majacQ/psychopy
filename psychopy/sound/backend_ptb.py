@@ -4,19 +4,21 @@
 """
 New backend for the Psychtoolbox portaudio engine
 """
-from __future__ import absolute_import, division, print_function
-
 import sys
 import os
 import time
 import re
 import weakref
+from pathlib import Path
 
 from psychopy import prefs, logging, exceptions
 from psychopy.constants import (STARTED, PAUSED, FINISHED, STOPPING,
                                 NOT_STARTED)
-from psychopy.exceptions import SoundFormatError, DependencyError
+from psychopy.tools import systemtools
+from psychopy.tools import filetools as ft
+from .exceptions import SoundFormatError, DependencyError
 from ._base import _SoundBase, HammingWindow
+from ..hardware import DeviceManager
 
 try:
     from psychtoolbox import audio
@@ -58,8 +60,6 @@ else:
 defaultInput = None
 defaultOutput = audioDevice
 
-
-travisCI = bool(str(os.environ.get('TRAVIS')).lower() == 'true')
 logging.info("Loaded psychtoolbox audio version {}"
              .format(audio.get_version_info()['version']))
 
@@ -86,18 +86,18 @@ def getDevices(kind=None):
     kind can be None, 'input' or 'output'
     The dict keys are names, and items are dicts of properties
     """
-    if sys.platform=='win32':
+    if sys.platform == 'win32':
         deviceTypes = 13  # only WASAPI drivers need apply!
     else:
         deviceTypes = None
     devs = {}
-    if travisCI:  # travis-CI testing does not have a sound device
+    if systemtools.isVM_CI():  # GitHub actions VM does not have a sound device
         return devs
     else:
         allDevs = audio.get_devices(device_type=deviceTypes)
 
     # annoyingly query_devices is a DeviceList or a dict depending on number
-    if type(allDevs) == dict:
+    if isinstance(allDevs, dict):
         allDevs = [allDevs]
 
     for ii, dev in enumerate(allDevs):
@@ -177,16 +177,16 @@ class _StreamsDict(dict):
         # todo: check if this is still needed on win32
         # on some systems more than one stream isn't supported so check
         elif sys.platform == 'win32' and len(self):
-            raise exceptions.SoundFormatError(
+            raise SoundFormatError(
                 "Tried to create audio stream {} but {} already exists "
                 "and {} doesn't support multiple portaudio streams"
-                    .format(label, list(self.keys())[0], sys.platform)
+                .format(label, list(self.keys())[0], sys.platform)
             )
         else:
 
             # create new stream
             self[label] = _MasterStream(sampleRate, channels, blockSize,
-                                       device=defaultOutput)
+                                        device=defaultOutput)
         return label, self[label]
 
 
@@ -209,9 +209,9 @@ class _MasterStream(audio.Stream):
         self.duplex = duplex
         self.blockSize = blockSize
         self.label = getStreamLabel(sampleRate, channels, blockSize)
-        if type(device) == list and len(device):
+        if isinstance(device, list) and len(device):
             device = device[0]
-        if type(device)==str:  # we need to convert name to an ID or make None
+        if isinstance(device, str):  # we need to convert name to an ID or make None
             devs = getDevices('output')
             if device in devs:
                 deviceID = devs[device]['DeviceIndex']
@@ -223,19 +223,19 @@ class _MasterStream(audio.Stream):
         self.takeTimeStamp = False
         self.frameN = 1
         # self.frameTimes = range(5)  # DEBUGGING: store the last 5 callbacks
-        if not travisCI:  # travis-CI testing does not have a sound device
+        if not systemtools.isVM_CI():  # Github Actions VM does not have a sound device
             try:
                 audio.Stream.__init__(self, device_id=deviceID, mode=mode+8,
-                                    latency_class=audioLatencyClass,
-                                    freq=sampleRate, 
-                                    channels=channels,
-                                    )  # suggested_latency=suggestedLatency
-            except OSError as e:
+                                      latency_class=audioLatencyClass,
+                                      freq=sampleRate,
+                                      channels=channels,
+                                      )  # suggested_latency=suggestedLatency
+            except OSError as e:  # noqa: F841
                 audio.Stream.__init__(self, device_id=deviceID, mode=mode+8,
-                                    latency_class=audioLatencyClass,
-                                    # freq=sampleRate, 
-                                    channels=channels,
-                                    )
+                                      latency_class=audioLatencyClass,
+                                      # freq=sampleRate,
+                                      channels=channels,
+                                      )
                 self.sampleRate = self.status['SampleRate']
                 print("Failed to start PTB.audio with requested rate of "
                       "{} but succeeded with a default rate ({}). "
@@ -244,14 +244,31 @@ class _MasterStream(audio.Stream):
             except TypeError as e:
                 print("device={}, mode={}, latency_class={}, freq={}, channels={}"
                       .format(device, mode+8, audioLatencyClass, sampleRate, channels))
-                raise(e)
+                raise e
             except Exception as e:
-                audio.Stream.__init__(self, mode=mode+8,
-                                    latency_class=audioLatencyClass,
-                                    freq=sampleRate, 
-                                    channels=channels,
-                                    )
-                
+                if deviceID == -1:
+                    # if default device doesn't setup from ptb, pick first device
+                    for device in audio.get_devices(device_type=13):
+                        logging.error(
+                            f"System default audio device failed to connect, so using first found "
+                            f"device: {device['DeviceName']}"
+                        )
+                        audio.Stream.__init__(
+                            self,mode=mode+8,
+                            device_id=device['DeviceIndex'],
+                            freq=device['DefaultSampleRate'],
+                            channels=device['NrOutputChannels']
+                        )
+                        break
+                else:
+                    # any other problem, try with no device ID
+                    audio.Stream.__init__(
+                        self, mode=mode+8,
+                        latency_class=audioLatencyClass,
+                        freq=sampleRate,
+                        channels=channels,
+                    )
+
                 if "there isn't any audio output device" in str(e):
                     print("Failed to load audio device:\n"
                           "    '{}'\n"
@@ -276,7 +293,7 @@ class SoundPTB(_SoundBase):
                  hamming=True,
                  startTime=0, stopTime=-1,
                  name='', autoLog=True,
-                 syncToWin=None):
+                 syncToWin=None, speaker=None):
         """
         :param value: note name ("C","Bfl"), filename or frequency (Hz)
         :param secs: duration (for synthesised tones)
@@ -304,6 +321,7 @@ class SoundPTB(_SoundBase):
         :param autoLog: whether to automatically log every change
         :param syncToWin: if you want start/stop to sync with win flips add this
         """
+        self.speaker = self._parseSpeaker(speaker)
         self.sound = value
         self.name = name
         self.secs = secs  # for any synthesised sounds (notesand freqs)
@@ -328,11 +346,25 @@ class SoundPTB(_SoundBase):
         self.sndArr = None
         self.hamming = hamming
         self._hammingWindow = None  # will be created during setSound
-        self.win=syncToWin
+        self.win = syncToWin
         # setSound (determines sound type)
         self.setSound(value, secs=self.secs, octave=self.octave,
                       hamming=self.hamming)
+        self._isPlaying = False  # set `True` after `play()` is called
+        self._isFinished = False
         self.status = NOT_STARTED
+
+    @property
+    def isPlaying(self):
+        """`True` if the audio playback is ongoing."""
+        # This will update _isPlaying if sound has stopped by _EOS()
+        _ = self._checkPlaybackFinished()
+        return self._isPlaying
+
+    @property
+    def isFinished(self):
+        """`True` if the audio playback has completed."""
+        return self._checkPlaybackFinished()
 
     def _getDefaultSampleRate(self):
         """Check what streams are open and use one of these"""
@@ -346,26 +378,6 @@ class SoundPTB(_SoundBase):
         if not self.track:
             return None
         return self.track.status
-
-    @property
-    def status(self):
-        """status gives a simple value from psychopy.constants to indicate
-        NOT_STARTED, STARTED, FINISHED, PAUSED
-
-        Psychtoolbox sounds also have a statusDetailed property with further info"""
-        if self.__dict__['status']==STARTED:
-            # check portaudio to see if still playing
-            pa_status = self.statusDetailed
-            if not pa_status['Active'] and pa_status['State']==0:
-                # we were playing and now not so presumably FINISHED
-                self._EOS()
-
-        return self.__dict__['status']
-
-
-    @status.setter
-    def status(self, newStatus):
-        self.__dict__['status'] = newStatus
 
     @property
     def volume(self):
@@ -389,9 +401,9 @@ class SoundPTB(_SoundBase):
     @stereo.setter
     def stereo(self, val):
         self.__dict__['stereo'] = val
-        if val == True:
+        if val is True:
             self.__dict__['channels'] = 2
-        elif val == False:
+        elif val is False:
             self.__dict__['channels'] = 1
         elif val == -1:
             self.__dict__['channels'] = -1
@@ -428,6 +440,9 @@ class SoundPTB(_SoundBase):
         _SoundBase.setSound(self, value, secs, octave, hamming, log)
 
     def _setSndFromFile(self, filename):
+        # alias default names (so it always points to default.png)
+        if filename in ft.defaultStim:
+            filename = Path(prefs.paths['assets']) / ft.defaultStim[filename]
         self.sndFile = f = sf.SoundFile(filename)
         self.sourceType = 'file'
         self.sampleRate = f.samplerate
@@ -461,7 +476,6 @@ class SoundPTB(_SoundBase):
             self._setSndFromArray(sndArr)
         self._channelCheck(
             self.sndArr)  # Check for fewer channels in stream vs data array
-
 
     def _setSndFromArray(self, thisArray):
 
@@ -513,12 +527,34 @@ class SoundPTB(_SoundBase):
             logging.error(msg)
             raise ValueError(msg)
 
-    def play(self, loops=None, when=None, log=True):
-        """Start the sound playing
+    def _checkPlaybackFinished(self):
+        """Checks whether playback has finished by looking up the status.
         """
+        # get detailed status from backend
+        pa_status = self.statusDetailed
+        # was the sound already finished?
+        wasFinished = self._isFinished
+        # is it finished now?
+        isFinished = self._isFinished = not pa_status['Active'] and pa_status['State'] == 0
+        # if it wasn't finished but now is, do end of stream behaviour
+        if isFinished and not wasFinished:
+            self._EOS()
+
+        return self._isFinished
+
+    def play(self, loops=None, when=None, log=True):
+        """Start the sound playing.
+
+        Calling this after the sound has finished playing will restart the
+        sound.
+
+        """
+        if self._checkPlaybackFinished():
+            self.stop(reset=True)
+
         if loops is not None and self.loops != loops:
             self.setLoops(loops)
-        self.status = STARTED
+
         self._tSoundRequestPlay = time.time()
 
         if hasattr(when, 'getFutureFlipTime'):
@@ -530,49 +566,59 @@ class SoundPTB(_SoundBase):
         else:
             logTime = None
         self.track.start(repetitions=loops, when=when)
+        self._isPlaying = True
+        self._isFinished = False
         # time.sleep(0.)
         if log and self.autoLog:
             logging.exp(u"Sound %s started" % (self.name), obj=self, t=logTime)
 
-    def pause(self):
-        """Stop the sound but play will continue from here if needed
+    def pause(self, log=True):
+        """Stops the sound without reset, so that play will continue from here if needed
         """
-        self.status = PAUSED
-        self.track.stop()
+        if self._isPlaying:
+            self.stop(reset=False, log=False)
+            if log and self.autoLog:
+                logging.exp(u"Sound %s paused" % (self.name), obj=self)
 
     def stop(self, reset=True, log=True):
         """Stop the sound and return to beginning
         """
-        if self.status == FINISHED:
+        # this uses FINISHED for some reason, all others use STOPPED
+        if not self._isPlaying:
             return
+
         self.track.stop()
+        self._isPlaying = False
+
         if reset:
             self.seek(0)
         if log and self.autoLog:
             logging.exp(u"Sound %s stopped" % (self.name), obj=self)
-        self.status = FINISHED
 
     def seek(self, t):
         self.t = t
         self.frameN = int(round(t * self.sampleRate))
         if self.sndFile and not self.sndFile.closed:
             self.sndFile.seek(self.frameN)
+        self._isFinished = t >= self.duration
 
     def _EOS(self, reset=True, log=True):
         """Function called on End Of Stream
         """
-        self.status = STOPPING
         self._loopsFinished += 1
-        if self.loops == 0:
+        if self._loopsFinished >= self._loopsRequested:
+            # if we have finished all requested loops
             self.stop(reset=reset, log=False)
-        elif self.loops > 0 and self._loopsFinished >= self.loops:
-            self.stop(reset=reset, log=False)
+        else:
+            # reset _isFinished back to False
+            self._isFinished = False
+
         if log and self.autoLog:
-            logging.exp(u"Sound %s reached end of file" % (self.name), obj=self)
+            logging.exp(u"Sound %s reached end of file" % self.name, obj=self)
 
     @property
     def stream(self):
-        """Read-only property returns the the stream on which the sound
+        """Read-only property returns the stream on which the sound
         will be played
         """
         if not self.streamLabel:

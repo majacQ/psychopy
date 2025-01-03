@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 
-from builtins import object
 from psychopy import data, logging
 import numpy as np
 import os, glob, shutil
@@ -12,7 +11,7 @@ from psychopy.tools.filetools import openOutputFile
 logging.console.setLevel(logging.DEBUG)
 
 
-class TestExperimentHandler(object):
+class TestExperimentHandler():
     def setup_class(self):
         self.tmpDir = mkdtemp(prefix='psychopy-tests-testExp')
         self.random_seed = 100
@@ -99,7 +98,7 @@ class TestExperimentHandler(object):
         # get data file contents:
         with io.open(exp.dataFileName + '.csv', 'r', encoding='utf-8-sig') as f:
             contents = f.read()
-        assert contents == "mutable,\n[1],\n[9999],\n"
+        assert contents == "thisRow.t,notes,mutable,\n,,[1],\n,,[9999],\n"
 
     def test_unicode_conditions(self):
         fileName = self.tmpDir + 'unicode_conds'

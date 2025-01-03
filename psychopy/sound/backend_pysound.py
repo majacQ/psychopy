@@ -1,13 +1,12 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+from pathlib import Path
 
-from __future__ import absolute_import, division, print_function
-
-from builtins import object
-from psychopy import logging, exceptions
+from psychopy import logging, prefs
+from .exceptions import DependencyError
 from psychopy.constants import (STARTED, PLAYING, PAUSED, FINISHED, STOPPED,
                                 NOT_STARTED, FOREVER)
-from psychopy.tools import attributetools
+from psychopy.tools import attributetools, filetools as ft
 from ._base import _SoundBase
 
 try:
@@ -15,7 +14,7 @@ try:
     import soundfile as sndfile
 except ImportError as err:
     # convert this import error to our own, pysoundcard probably not installed
-    raise exceptions.DependencyError(repr(err.msg))
+    raise DependencyError(repr(err.msg))
 
 import numpy
 from os import path
@@ -26,6 +25,7 @@ def init(rate=44100, stereo=True, buffer=128):
     pass
     # for compatibility with other backends but not needed
 
+
 def getDevices(kind=None):
     """Returns a dict of dict of audio devices of specified `kind`
 
@@ -33,21 +33,22 @@ def getDevices(kind=None):
     """
     devs = {}
     for ii, dev in enumerate(soundcard.device_info()):
-        if (dev['max_output_channels']==0 and kind=='output' or
-                dev['max_input_channels']==0 and kind=='input'):
+        if (dev['max_output_channels'] == 0 and kind == 'output' or
+                dev['max_input_channels'] == 0 and kind == 'input'):
             continue
         # newline characters must be removed
-        devName = dev['name'].replace('\r\n','')
+        devName = dev['name'].replace('\r\n', '')
         devs[devName] = dev
         dev['id'] = ii
     return devs
+
 
 # these will be controlled by sound.__init__.py
 defaultInput = None
 defaultOutput = None
 
 
-class _PySoundCallbackClass(object):
+class _PySoundCallbackClass():
     """To use callbacks without creating circular references we need a
     callback class.
 
@@ -116,7 +117,7 @@ class SoundPySoundCard(_SoundBase):
 
     def __init__(self, value="C", secs=0.5, octave=4, sampleRate=44100,
                  bits=None, name='', autoLog=True, loops=0, bufferSize=128,
-                 volume=1, stereo=True):
+                 volume=1, stereo=True, speaker=None):
         """Create a sound and get ready to play
 
         :parameters:
@@ -173,6 +174,8 @@ class SoundPySoundCard(_SoundBase):
         self.name = name  # only needed for autoLogging
         self.autoLog = autoLog
 
+        self.speaker = self._parseSpeaker(speaker)
+
         self.sampleRate = sampleRate
         self.bufferSize = bufferSize
         self.volume = volume
@@ -184,6 +187,13 @@ class SoundPySoundCard(_SoundBase):
         # -1 for infinite or a number of loops
         self.requestedLoops = self.loops = int(loops)
         self.setSound(value=value, secs=secs, octave=octave)
+
+        self._isPlaying = False
+
+    @property
+    def isPlaying(self):
+        """`True` if the audio playback is ongoing."""
+        return self._isPlaying
 
     def play(self, fromStart=True, log=True, loops=None, when=None):
         """Starts playing the sound on an available channel.
@@ -211,18 +221,24 @@ class SoundPySoundCard(_SoundBase):
             will be played over each other.
 
         """
+        if self.isPlaying:
+            return
+
         if loops is not None:
             self.loops = loops
         self._stream.start()
-        self.status = STARTED
+        self._isPlaying = True
         if log and self.autoLog:
             logging.exp("Sound %s started" % (self.name), obj=self)
         return self
 
     def stop(self, log=True):
         """Stops the sound immediately"""
+        if not self.isPlaying:  # already stopped
+            return
+
         self._stream.abort()  # _stream.stop() finishes current buffer
-        self.status = STOPPED
+        self._isPlaying = False
         if log and self.autoLog:
             logging.exp("Sound %s stopped" % (self.name), obj=self)
 
@@ -231,11 +247,11 @@ class SoundPySoundCard(_SoundBase):
         Don't know why you would do this in psychophysics but it's easy
         and fun to include as a possibility :)
         """
-        pass  # todo
-        self.status = STOPPED
+        # todo
+        self._isPlaying = False
 
     def getDuration(self):
-        """Get's the duration of the current sound in secs
+        """Gets the duration of the current sound in secs
         """
         pass  # todo
 
@@ -252,6 +268,9 @@ class SoundPySoundCard(_SoundBase):
         return value  # this is returned for historical reasons
 
     def _setSndFromFile(self, fileName):
+        # alias default names (so it always points to default.png)
+        if fileName in ft.defaultStim:
+            fileName = Path(prefs.paths['assets']) / ft.defaultStim[fileName]
         # load the file
         if not path.isfile(fileName):
             msg = "Sound file %s could not be found." % fileName
@@ -270,17 +289,6 @@ class SoundPySoundCard(_SoundBase):
             msg = "Sound file %s could not be opened using pysoundcard for sound."
             logging.error(msg % fileName)
             raise ValueError(msg % fileName)
-
-    @property
-    def status(self):
-        # NB this is stored by the _callbacks class for fast access when
-        # data buffer needs filling (_callbacks class does not have a
-        # reference back here)
-        return self.__dict__['status']
-
-    @status.setter
-    def status(self, status):
-        self.__dict__['status'] = status
 
     def _setSndFromArray(self, thisArray):
         """For pysoundcard all sounds are ultimately played as an array so
@@ -318,7 +326,7 @@ class SoundPySoundCard(_SoundBase):
     def _onEOS(self, log=True):
         if log and self.autoLog:
             logging.exp("Sound %s finished" % (self.name), obj=self)
-        self.status = FINISHED
+        self._isPlaying = False
 
     def __del__(self):
         self._stream.close()

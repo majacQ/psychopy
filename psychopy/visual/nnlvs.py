@@ -65,7 +65,10 @@ vshdModels = {
 
 class VisualSystemHD(window.Window):
     """Class provides support for NordicNeuralLab's VisualSystemHD(tm) fMRI
-    display hardware.
+    display hardware. This is a lazy-imported class, therefore import using
+    full path `from psychopy.visual.nnlvs import VisualSystemHD` when
+    inheriting from it.
+
 
     Use this class in-place of the `Window` class for use with the VSHD
     hardware. Ensure that the VSHD headset display output is configured in
@@ -232,7 +235,7 @@ class VisualSystemHD(window.Window):
         self._hwModel = model
         self._hwDesc = vshdModels[self._hwModel]
 
-        # distortion coefficent
+        # distortion coefficient
         self._distCoef = \
             self._hwDesc['distCoef'] if distCoef is None else float(distCoef)
 
@@ -418,7 +421,7 @@ class VisualSystemHD(window.Window):
     #     return (self._diopters[eye] / 4.) + 1.
     #
     # def _getScreenFOV(self, eye, direction='horizontal', degrees=True):
-    #     """Compute the FOV of the the display."""
+    #     """Compute the FOV of the display."""
     #     if direction not in ('horizontal', 'vertical'):
     #         raise ValueError("Invalid `direction` specified, must be "
     #                          "'horizontal' or 'vertical'.")

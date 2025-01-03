@@ -23,11 +23,6 @@ There is also a legacy API which consists of the routines which are directly
 in this module. That API assumes you only ever want to use a single
 parallel port at once.
 """
-from __future__ import absolute_import, print_function
-
-from builtins import str
-from past.builtins import basestring
-from builtins import object
 import sys
 from psychopy import logging
 
@@ -45,6 +40,7 @@ elif sys.platform == 'win32':
                    dlportio=('_dlportio', 'PParallelDLPortIO'))
     from ctypes import windll
     from importlib import import_module
+    ParallelPort = None
     for key, val in drivers.items():
         driver_name, class_name = val
         try:
@@ -64,7 +60,7 @@ else:
                     "(which doesn't have a parallel port?)")
 
     # macOS doesn't have a parallel port but write the class for doc purps
-    class ParallelPort(object):
+    class ParallelPort:
         """Class for read/write access to the parallel port on Windows & Linux
 
         Usage::
@@ -148,7 +144,7 @@ def setPortAddress(address=0x0378):
 
     global PORT
     # convert u"0x0378" into 0x0378
-    if isinstance(address, basestring) and address.startswith('0x'):
+    if isinstance(address, str) and address.startswith('0x'):
         address = int(address, 16)
 
     # This is useful with the Linux-based driver where deleting

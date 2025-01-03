@@ -8,14 +8,14 @@ sounds in PsychoPy. We started with `Pygame`, then tried `pyo` and `sounddevice`
 but we now strongly recommend you use the PTB setting. That uses the
 `PsychPortAudio`_ engine, written by Mario Kleiner for `Psychophysics Toolbox`_.
 
-With the PTB backend you get some options about how agressively you want to try
+With the PTB backend you get some options about how aggressively you want to try
 for low latency, and there is also an option to pre-schedule a sound to play at
 a given time in the future.
 
 By default PsychoPy will try to use the following Libs, in this order, for
 sound reproduction but you can alter the order in
 preferences > hardware > audioLib:
-    ['sounddevice', 'pygame', 'pyo']
+    ['sounddevice', 'pyo', 'pygame']
 For portaudio-based backends (all except for pygame) there is also a
 choice of the underlying sound driver (e.g. ASIO, CoreAudio etc).
 
@@ -30,108 +30,218 @@ After importing sound, the sound lib and driver being used will be stored as::
 """
 
 # Part of the PsychoPy library
-# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2021 Open Science Tools Ltd.
+# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2024 Open Science Tools Ltd.
 # Distributed under the terms of the GNU General Public License (GPL).
 
-from __future__ import absolute_import, division, print_function
-
-__all__ = []
-
-from builtins import str
-from past.types import basestring
 import sys
 import os
-from psychopy import logging, prefs, exceptions, constants
+import traceback
+from psychopy import logging, prefs, constants
+from psychopy.tools import systemtools
+from .exceptions import DependencyError, SoundFormatError
 from .audiodevice import *
 from .audioclip import *  # import objects related to AudioClip
-from .microphone import *  # import objects related to the microphone class
+from . import microphone
 
+__all__ = ["microphone"]
+
+# # import transcription if possible
+# try:
+#     from .transcribe import *  # import transcription engine stuff
+# except ImportError as err:
+#     formatted_tb = ''.join(
+#         traceback.format_exception(type(err), err, err.__traceback__))
+#     logging.error(
+#         "Failed to import psychopy.sound.transcribe. Transcription will not be"
+#         "possible on this machine. For details see stack trace below:\n"
+#         f"{formatted_tb}")
+
+# used to check if we are on 64-bit Python
+bits32 = sys.maxsize == 2 ** 32
+
+# Globals for the sound library. We can only load one audio library at a time,
+# so once these values are populated they cannot be changed without restarting
+# Python.
 pyoSndServer = None
 Sound = None
 audioLib = None
 audioDriver = None
-bits32 = sys.maxsize == 2 ** 32
+backend = None
 
+# These are the names that can be used in the prefs to specifiy audio libraries.
+# The available libraries are hard-coded at this point until we can overhaul
+# the sound library to be more modular.
 _audioLibs = ['PTB', 'sounddevice', 'pyo', 'pysoundcard', 'pygame']
-failed = []
+failed = []  # keep track of audio libs that failed to load
 
-# check if this is being imported on Travis (has no audio card)
-travisCI = bool(str(os.environ.get('TRAVIS')).lower() == 'true')
-if travisCI:
-    # for sounddevice we built in some TravisCI protection but not in pyo
-    prefs.hardware['audioLib'] = ['sounddevice']
+# check if this is being imported on Travis/Github (has no audio card)
+if systemtools.isVM_CI():
+    # for sounddevice we built in some VM protection but not in pyo
+    prefs.hardware['audioLib'] = ['ptb', 'sounddevice']
 
-if isinstance(prefs.hardware['audioLib'], basestring):
+# ensure that the value for `audioLib` is a list
+if isinstance(prefs.hardware['audioLib'], str):
     prefs.hardware['audioLib'] = [prefs.hardware['audioLib']]
+
+thisLibName = None  # name of the library we are trying to load
+
+# selection and fallback mechanism for audio libraries
 for thisLibName in prefs.hardware['audioLib']:
-    try:
-        if thisLibName.lower() == 'ptb':
-            from . import backend_ptb as backend
-            Sound = backend.SoundPTB
-            audioDriver = backend.audioDriver
-        elif thisLibName == 'pyo':
+    # Tell the user we are trying to load the specifeid audio library
+    logging.info(f"Trying to load audio library: {thisLibName}")
+
+    # Iterate over the list of audioLibs and try to load the first one that
+    # is supported. If none are supported, load PTB as a fallback. If PTB isn't
+    # installed, raise an error.
+    thisLibName = thisLibName.lower()
+
+    # lowercased list of valid audio libraries for safe comparisons
+    validLibs = [libName.lower() for libName in _audioLibs]
+
+    # check if `thisLibName` is a valid audio library
+    if thisLibName not in validLibs:
+        failed.append(thisLibName)
+        logging.warning(f"Invalid audioLib pref: {thisLibName}. "
+                        f"Valid options are: {_audioLibs}")
+        continue
+
+    # select the backend and set the Sound class
+    if thisLibName == 'ptb':
+        # The Psychtoolbox backend is preferred, provides the best performance
+        # and is the only one that supports low-latency scheduling. If no other
+        # audio backend can be loaded, we will use PTB.
+        if not bits32:
+            try:
+                from . import backend_ptb as backend
+                Sound = backend.SoundPTB
+                audioDriver = backend.audioDriver
+            except Exception:
+                failed.append(thisLibName)
+                continue
+            else:
+                break
+        else:
+            logging.warning("PTB backend is not supported on 32-bit Python. "
+                            "Trying another backend...")
+            continue
+    elif thisLibName == 'pyo':
+        # pyo is a wrapper around PortAudio, which is a cross-platform audio
+        # library. It is the recommended backend for Windows and Linux.
+        try:
+            # Caution: even import failed inside, we still get a module object.
+            # This is not the case for other backends and may not be desired.
             from . import backend_pyo as backend
             Sound = backend.SoundPyo
             pyoSndServer = backend.pyoSndServer
             audioDriver = backend.audioDriver
-        elif thisLibName == 'sounddevice':
+        except Exception:
+            failed.append(thisLibName)
+            continue
+        else:
+            break
+    elif thisLibName == 'sounddevice':
+        # sounddevice is a wrapper around PortAudio, which is a cross-platform
+        # audio library. It is the recommended backend for Windows and Linux.
+        try:
+            # Caution: even import failed inside, we still get a module object.
+            # This is not the case for other backends and may not be desired.
             from . import backend_sounddevice as backend
             Sound = backend.SoundDeviceSound
-        elif thisLibName == 'pygame':
+        except Exception:
+            failed.append(thisLibName)
+            continue
+        else:
+            break
+    elif thisLibName == 'pygame':
+        # pygame is a cross-platform audio library. It is no longer supported by
+        # PsychoPy, but we keep it here for backwards compatibility until
+        # something breaks.
+        try:
             from . import backend_pygame as backend
             Sound = backend.SoundPygame
-        elif thisLibName == 'pysoundcard':
+        except Exception:
+            failed.append(thisLibName)
+            continue
+        else:
+            break
+    elif thisLibName == 'pysoundcard':
+        # pysoundcard is a wrapper around PortAudio, which is a cross-platform
+        # audio library.
+        try:
             from . import backend_pysound as backend
             Sound = backend.SoundPySoundCard
+        except Exception:
+            failed.append(thisLibName)
+            continue
         else:
-            msg = ("audioLib pref should be one of {!r}, not {!r}"
-                   .format(_audioLibs, thisLibName))
-            raise ValueError(msg)
-        # if we got this far we were successful in loading the lib
-        audioLib = thisLibName
-        init = backend.init
-        if hasattr(backend, 'getDevices'):
-            getDevices = backend.getDevices
-        logging.info('sound is using audioLib: %s' % audioLib)
-        break
-    except exceptions.DependencyError as e:
-        failed.append(thisLibName.lower())
-        msg = '%s audio lib was requested but not loaded: %s'
-        logging.warning(msg % (thisLibName, sys.exc_info()[1]))
-        continue  # to try next audio lib
+            break
+    else:
+        # Catch-all for invalid audioLib prefs.
+        msg = ("audioLib pref should be one of {!r}, not {!r}"
+               .format(_audioLibs, thisLibName))
+        raise ValueError(msg)
+else:
+    # if we get here, there is no audioLib that is supported, try for PTB
+    msg = ("Failed to load any of the audioLibs: {!r}. Falling back to "
+           "PsychToolbox ('ptb') backend for sound. Be sure to add 'ptb' to "
+           "preferences to avoid seeing this message again.".format(failed))
+    logging.error(msg)
+    try:
+        from . import backend_ptb as backend
+        Sound = backend.SoundPTB
+        audioDriver = backend.audioDriver
+    except Exception:
+        failed.append(thisLibName)
 
-if audioLib is None:
-    raise exceptions.DependencyError(
-            "No sound libs could be loaded. Tried: {}\n"
-            "Check whether the necessary sound libs are installed"
-            .format(prefs.hardware['audioLib']))
-elif audioLib.lower() != 'ptb':
-    if constants.PY3 and not bits32 and 'ptb' not in failed:  
+
+# we successfully loaded a backend if `Sound` is not None
+if Sound is not None:
+    audioLib = thisLibName
+    init = backend.init
+    if hasattr(backend, 'getDevices'):
+        getDevices = backend.getDevices
+    logging.info('sound is using audioLib: %s' % audioLib)
+else:
+    # if we get here, there is no audioLib that is supported
+    logging.error(
+        "No audioLib could be loaded. Tried: {}\n Check whether the necessary "
+        "audioLibs are installed.".format(prefs.hardware['audioLib']))
+
+# warn the user
+if audioLib is not None:
+    if audioLib.lower() != 'ptb':
         # Could be running PTB, just aren't?
         logging.warning("We strongly recommend you activate the PTB sound "
                         "engine in PsychoPy prefs as the preferred audio "
                         "engine. Its timing is vastly superior. Your prefs "
                         "are currently set to use {} (in that order)."
                         .format(prefs.hardware['audioLib']))
-    else:  # Can't run PTB anyway due to Py2 or 32bit system
-        logging.warning("For experiments that use audio stimuli, timing will "
-                        "be much better if you upgrade your PsychoPy "
-                        "installation to a 64bit Python3 installation and use "
-                        "the PTB backend.")
 
 
 # function to set the device (if current lib allows it)
 def setDevice(dev, kind=None):
     """Sets the device to be used for new streams being created.
 
-    :param dev: the device to be used (name, index or sounddevice.device)
-    :param kind: one of [None, 'output', 'input']
+    Parameters
+    ----------
+    dev: str or dict
+        Name of the device to be used (name, index or sounddevice.device)
+    kind: str
+        One of [None, 'output', 'input']
+
     """
+    if dev is None:
+        # if given None, do nothing
+        return
+
+    global backend  # pull from module namespace
     if not hasattr(backend, 'defaultOutput'):
         raise IOError("Attempting to SetDevice (audio) but not supported by "
                       "the current audio library ({!r})".format(audioLib))
-    if hasattr(dev,'name'):
+
+    if hasattr(dev, 'name'):
         dev = dev['name']
+
     if kind is None:
         backend.defaultInput = backend.defaultOutput = dev
     elif kind == 'input':
@@ -139,30 +249,41 @@ def setDevice(dev, kind=None):
     elif kind == 'output':
         backend.defaultOutput = dev
     else:
-        if travisCI:  # travisCI doesn't have any audio devices at all. Ignore
+        if systemtools.isVM_CI():  # no audio device on CI, ignore
             return
         else:
-            raise TypeError("`kind` should be one of [None, 'output', 'input']"
+            raise TypeError("`kind` should be one of [None, 'output', 'input'] "
                             "not {!r}".format(kind))
+
 
 # Set the device according to user prefs (if current lib allows it)
 deviceNames = []
-if hasattr(backend, 'defaultOutput'):
+if backend is None:
+    raise ImportError("None of the audio library backends could be imported. "
+                      "Tried: {}\n Check whether the necessary audioLibs are "
+                      "installed and can be imported successfully."
+                      .format(prefs.hardware['audioLib']))
+elif hasattr(backend, 'defaultOutput'):
     pref = prefs.hardware['audioDevice']
     # is it a list or a simple string?
-    if type(prefs.hardware['audioDevice'])==list:
+    if isinstance(pref, list):
         # multiple options so use zeroth
-        dev = prefs.hardware['audioDevice'][0]
+        dev = pref[0]
     else:
         # a single option
-        dev = prefs.hardware['audioDevice']
+        dev = pref
     # is it simply "default" (do nothing)
-    if dev=='default' or travisCI:
+    if dev == 'default' or systemtools.isVM_CI():
         pass  # do nothing
     elif dev not in backend.getDevices(kind='output'):
         deviceNames = sorted(backend.getDevices(kind='output').keys())
-        logging.warn(u"Requested audio device '{}' that is not available on "
-                        "this hardware. The 'audioDevice' preference should be one of "
-                        "{}".format(dev, deviceNames))
+        logging.warn(
+            u"Requested audio device '{}' that is not available on "
+            "this hardware. The 'audioDevice' preference should be one of "
+            "{}".format(dev, deviceNames))
     else:
         setDevice(dev, kind='output')
+
+
+if __name__ == "__main__":
+    pass

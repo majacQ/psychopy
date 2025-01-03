@@ -1,15 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-from __future__ import absolute_import, print_function
-
-from os import path
 from pathlib import Path
 from psychopy.experiment.components import BaseComponent, Param, _translate
-from psychopy import prefs
-
-# only use _localized values for label values, nothing functional:
-_localized = {'name': _translate('Name')}
 
 
 class UnknownComponent(BaseComponent):
@@ -21,26 +14,26 @@ class UnknownComponent(BaseComponent):
     """
     targets = ['PsychoPy']
 
-    categories = ['Custom']
+    categories = ['Other']
     targets = ['PsychoPy']
     iconFile = Path(__file__).parent / 'unknown.png'
     tooltip = _translate('Unknown: A component that is not known by the current '
                          'installed version of PsychoPy\n(most likely from the '
                          'future)')
 
-    def __init__(self, exp, parentName, name=''):
-        self.type = 'Unknown'
+    def __init__(self, exp, parentName, name='', compType="UnknownComponent"):
         self.exp = exp  # so we can access the experiment if necess
         self.parentName = parentName  # to access the routine too if needed
         self.params = {}
         self.depends = []
-        _hint = _translate("Name of this component (alpha-numeric or _, "
-                           "no spaces)")
-        self.params['name'] = Param(name, valType='code', inputType="multi",
-                                    hint=_hint,
-                                    label=_localized['name'])
-        super(UnknownComponent, self).__init__(exp, parentName)
-        self.order += []
+        super(UnknownComponent, self).__init__(exp, parentName, name=name)
+        self.type = compType
+
+    @property
+    def _xml(self):
+        # make XML node with tag from self.type rather than class name
+        return self.makeXmlNode(self.type)
+
     # make sure nothing gets written into experiment for an unknown object
     # class!
 
@@ -51,7 +44,20 @@ class UnknownComponent(BaseComponent):
         pass
 
     def writeInitCode(self, buff):
-        pass
+        code = (
+            "\n"
+            "# Unknown component ignored: %(name)s\n"
+            "\n"
+        )
+        buff.writeIndentedLines(code % self.params)
+
+    def writeInitCodeJS(self, buff):
+        code = (
+            "\n"
+            "// Unknown component ignored: %(name)s\n"
+            "\n"
+        )
+        buff.writeIndentedLines(code % self.params)
 
     def writeFrameCode(self, buff):
         pass

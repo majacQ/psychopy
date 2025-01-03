@@ -1,6 +1,6 @@
-"""ioHub Common Eye Tracker Interface"""
-# Part of the psychopy.iohub library.
-# Copyright (C) 2012-2016 iSolver Software Solutions
+# -*- coding: utf-8 -*-
+# Part of the PsychoPy library
+# Copyright (C) 2012-2020 iSolver Software Solutions (C) 2021 Open Science Tools Ltd.
 # Distributed under the terms of the GNU General Public License (GPL).
 from .. import Device, ioDeviceError
 from ...constants import DeviceConstants, EyeTrackerConstants
@@ -232,10 +232,11 @@ class EyeTrackerDevice(Device):
 
         return EyeTrackerConstants.FUNCTIONALITY_NOT_SUPPORTED
 
-    def runSetupProcedure(self):
+    def runSetupProcedure(self, calibration_args={}):
         """
         The runSetupProcedure method starts the eye tracker calibration
-        routine.
+        routine. If calibration_args are provided, they should be used to
+        update calibration related settings prior to starting the calibration.
         
         The details of this method are implementation-specific.
 
@@ -249,6 +250,52 @@ class EyeTrackerDevice(Device):
             None
         """
         return EyeTrackerConstants.EYETRACKER_INTERFACE_METHOD_NOT_SUPPORTED
+    
+    @staticmethod
+    def getCalibrationDict(calib):
+        """
+        Create a dict describing the given Calibration object, respecting this 
+        eyetracker's specific limitations. If not overloaded by a subclass, this 
+        will use the same fields and values as MouseGaze.
+
+        Parameters
+        ----------
+        calib : psychopy.hardware.eyetracker.EyetrackerCalibration
+            Object to create a dict from
+        
+        Returns
+        -------
+        dict
+            Dict describing the given Calibration object
+        """
+        return {
+            'target_attributes': {
+                # target outer circle
+                'outer_diameter': calib.target.radius * 2,
+                'outer_stroke_width': calib.target.outer.lineWidth,
+                'outer_fill_color': getattr(calib.target.outer._fillColor, calib.colorSpace) if calib.target.outer._fillColor else getattr(calib.target.win._color, calib.colorSpace),
+                'outer_line_color': getattr(calib.target.outer._borderColor, calib.colorSpace) if calib.target.outer._borderColor else getattr(calib.target.win._color, calib.colorSpace),
+                # target inner circle
+                'inner_diameter': calib.target.innerRadius * 2,
+                'inner_stroke_width': calib.target.inner.lineWidth,
+                'inner_fill_color': getattr(calib.target.inner._borderColor, calib.colorSpace) if calib.target.inner._borderColor else getattr(calib.target.win._color, calib.colorSpace),
+                'inner_line_color': getattr(calib.target.inner._borderColor, calib.colorSpace) if calib.target.inner._borderColor else getattr(calib.target.win._color, calib.colorSpace),
+                # target animation
+                'animate':{
+                    'enable': calib.movementAnimation,
+                    'expansion_ratio': calib.expandScale,
+                    'contract_only': calib.expandScale == 1,
+                },
+            },
+            'type': calib.targetLayout,
+            'randomize': calib.randomisePos,
+            'auto_pace': calib.progressMode == "time",
+            'pacing_speed': calib.targetDelay,
+            'unit_type': calib.units,
+            'color_type': calib.colorSpace,
+            'text_color': calib.textColor if str(calib.textColor).lower() != "auto" else None,
+            'screen_background_color': getattr(calib.win._color, calib.colorSpace),
+        }
 
     def setRecordingState(self, recording):
         """The setRecordingState method is used to start or stop the recording
@@ -337,19 +384,20 @@ class EyeTrackerDevice(Device):
             None: If the eye tracker is not currently recording data or no eye samples have been received.
 
             tuple: Latest (gaze_x,gaze_y) position of the eye(s)
-
         """
         return self._latest_gaze_position
 
     def getPosition(self):
-        """The getPosition method is the same as the getLastGazePosition
-        method, provided as a consistent cross device method to access the
-        current screen position reported by a device.
-
-        See getLastGazePosition for further details.
-
         """
-        return self._latest_gaze_position
+        See getLastGazePosition().
+        """
+        return self.getLastGazePosition()
+
+    def getPos(self):
+        """
+        See getLastGazePosition().
+        """
+        return self.getLastGazePosition()
 
     def _eyeTrackerToDisplayCoords(self, eyetracker_point):
         """The _eyeTrackerToDisplayCoords method is required for implementation

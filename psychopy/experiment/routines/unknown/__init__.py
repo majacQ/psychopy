@@ -3,11 +3,28 @@ from pathlib import Path
 
 
 class UnknownRoutine(BaseStandaloneRoutine):
-    categories = ['Custom']
+    categories = ['Other']
     targets = []
     iconFile = Path(__file__).parent / "unknown.png"
     tooltip = "Unknown routine"
+    # hide from the Components panel
+    hidden = True
 
     def __init__(self, exp, name=''):
         BaseStandaloneRoutine.__init__(self, exp, name=name)
-        self.type = 'UnknownStandaloneRoutine'
+
+    def writeMainCode(self, buff):
+        code = (
+            "\n"
+            "# Unknown standalone routine ignored: %(name)s\n"
+            "\n"
+        )
+        buff.writeIndentedLines(code % self.params)
+
+    def writeRoutineBeginCodeJS(self, buff):
+        code = (
+            "\n"
+            "// Unknown standalone routine ignored: %(name)s\n"
+            "\n"
+        )
+        buff.writeIndentedLines(code % self.params)

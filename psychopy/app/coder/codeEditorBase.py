@@ -7,22 +7,17 @@
 """
 
 # Part of the PsychoPy library
-# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2021 Open Science Tools Ltd.
+# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2024 Open Science Tools Ltd.
 # Distributed under the terms of the GNU General Public License (GPL).
 
 import wx
 import wx.stc
-import sys
-from pkg_resources import parse_version
-from psychopy.constants import PY3
-from psychopy import logging
-from psychopy import prefs
-from ..themes import ThemeMixin
+from ..themes import handlers
 
 from psychopy.localization import _translate
 
 
-class BaseCodeEditor(wx.stc.StyledTextCtrl, ThemeMixin):
+class BaseCodeEditor(wx.stc.StyledTextCtrl, handlers.ThemeMixin):
     """Provides base class for code editors
        See the wxPython demo styledTextCtrl 2.
     """
@@ -58,28 +53,13 @@ class BaseCodeEditor(wx.stc.StyledTextCtrl, ThemeMixin):
 
         # setup margins for line numbers
         self.SetMarginType(0, wx.stc.STC_MARGIN_NUMBER)
-        self.SetMarginWidth(0, 40)
+        self.Bind(wx.EVT_IDLE, self.onIdle)
 
         # Setup a margin to hold fold markers
         self.SetMarginType(1, wx.stc.STC_MARGIN_SYMBOL)
         self.SetMarginMask(1, wx.stc.STC_MASK_FOLDERS)
         self.SetMarginSensitive(1, True)
         self.SetMarginWidth(1, 12)
-
-        self.MarkerDefine(wx.stc.STC_MARKNUM_FOLDEROPEN,
-                          wx.stc.STC_MARK_BOXMINUS, "white", "#808080")
-        self.MarkerDefine(wx.stc.STC_MARKNUM_FOLDER,
-                          wx.stc.STC_MARK_BOXPLUS, "white", "#808080")
-        self.MarkerDefine(wx.stc.STC_MARKNUM_FOLDERSUB,
-                          wx.stc.STC_MARK_VLINE, "white", "#808080")
-        self.MarkerDefine(wx.stc.STC_MARKNUM_FOLDERTAIL,
-                          wx.stc.STC_MARK_LCORNER, "white", "#808080")
-        self.MarkerDefine(wx.stc.STC_MARKNUM_FOLDEREND,
-                          wx.stc.STC_MARK_BOXPLUSCONNECTED, "white", "#808080")
-        self.MarkerDefine(wx.stc.STC_MARKNUM_FOLDEROPENMID,
-                          wx.stc.STC_MARK_BOXMINUSCONNECTED, "white", "#808080")
-        self.MarkerDefine(wx.stc.STC_MARKNUM_FOLDERMIDTAIL,
-                          wx.stc.STC_MARK_TCORNER, "white", "#808080")
 
         # Set what kind of events will trigger a modified event
         self.SetModEventMask(wx.stc.STC_MOD_DELETETEXT |
@@ -88,18 +68,24 @@ class BaseCodeEditor(wx.stc.StyledTextCtrl, ThemeMixin):
         # Bind context menu
         self.Bind(wx.EVT_CONTEXT_MENU, self.OnContextMenu)
 
+    def onIdle(self, evt):
+        # update margin width to fit number of characters in biggest line num
+        n = len(str(self.GetNumberOfLines()))
+        self.SetMarginWidth(0, self.GetTextExtent("M")[0] * n)
+        evt.Skip()
+
     def OnContextMenu(self, event):
         """Sets the context menu for components using code editor base class"""
 
         if not hasattr(self, "UndoID"):
             # Create a new ID for all items
-            self.UndoID = wx.NewId()
-            self.RedoID = wx.NewId()
-            self.CutID = wx.NewId()
-            self.CopyID = wx.NewId()
-            self.PasteID = wx.NewId()
-            self.DeleteID = wx.NewId()
-            self.SelectAllID = wx.NewId()
+            self.UndoID = wx.NewIdRef(count=1)
+            self.RedoID = wx.NewIdRef(count=1)
+            self.CutID = wx.NewIdRef(count=1)
+            self.CopyID = wx.NewIdRef(count=1)
+            self.PasteID = wx.NewIdRef(count=1)
+            self.DeleteID = wx.NewIdRef(count=1)
+            self.SelectAllID = wx.NewIdRef(count=1)
 
         # Bind items to relevant method
         self.Bind(wx.EVT_MENU, self.onUndo, id=self.UndoID)
@@ -120,14 +106,6 @@ class BaseCodeEditor(wx.stc.StyledTextCtrl, ThemeMixin):
         deleteItem = wx.MenuItem(menu, self.DeleteID, _translate("Delete"))
         selectItem = wx.MenuItem(menu, self.SelectAllID, _translate("Select All"))
 
-        # Check whether items should be enabled
-        undoItem.Enable(self.CanUndo())
-        redoItem.Enable(self.CanRedo())
-        cutItem.Enable(self.CanCut())
-        copyItem.Enable(self.CanCopy())
-        pasteItem.Enable(self.CanPaste())
-        deleteItem.Enable(self.CanCopy())
-
         # Append items to menu
         menu.Append(undoItem)
         menu.Append(redoItem)
@@ -138,6 +116,14 @@ class BaseCodeEditor(wx.stc.StyledTextCtrl, ThemeMixin):
         menu.AppendSeparator()
         menu.Append(deleteItem)
         menu.Append(selectItem)
+
+        # Check whether items should be enabled
+        undoItem.Enable(self.CanUndo())
+        redoItem.Enable(self.CanRedo())
+        cutItem.Enable(self.CanCut())
+        copyItem.Enable(self.CanCopy())
+        pasteItem.Enable(self.CanPaste())
+        deleteItem.Enable(self.CanCopy())
 
         self.PopupMenu(menu)
         menu.Destroy()
@@ -206,7 +192,7 @@ class BaseCodeEditor(wx.stc.StyledTextCtrl, ThemeMixin):
         nLines = len(self._GetSelectedLineNumbers())
         nHashtags = self.HashtagCounter(self.GetTextRange(startText, endText))
         passDec = False # pass decision - only pass  if line is blank
-        # Test decision criteria, and catch devision errors
+        # Test decision criteria, and catch division errors
         # when caret starts at line with no text, or at beginning of line...
         try:
             devCrit, decVal = .6, nHashtags / nLines # Decision criteria and value
@@ -354,15 +340,6 @@ class BaseCodeEditor(wx.stc.StyledTextCtrl, ThemeMixin):
         clip.Close()
         if success:
             txt = dataObj.GetText()
-            # dealing with unicode error in wx3 for Mac
-            if parse_version(wx.__version__) >= parse_version('3') and sys.platform == 'darwin' and not PY3:
-                try:
-                    # if we can decode from utf-8 then all is good
-                    txt.decode('utf-8')
-                except Exception as e:
-                    logging.error(str(e))
-                    # if not then wx conversion broke so get raw data instead
-                    txt = dataObj.GetDataHere()
             self.ReplaceSelection(txt.replace("\r\n", "\n").replace("\r", "\n"))
 
         self.analyseScript()

@@ -2,22 +2,18 @@
 # -*- coding: utf-8 -*-
 
 # Part of the PsychoPy library
-# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2021 Open Science Tools Ltd.
+# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2024 Open Science Tools Ltd.
 # Distributed under the terms of the GNU General Public License (GPL).
 
 # set the gamma LUT using platform-specific hardware calls
 
-from __future__ import absolute_import, division, print_function
-
-from builtins import map
-from builtins import range
 import numpy
 import sys
 import platform
 import ctypes
 import ctypes.util
 from psychopy import logging, prefs
-from psychopy.tests import _vmTesting
+from psychopy.tools import systemtools
 
 # import platform specific C++ libs for controlling gamma
 if sys.platform == 'win32':
@@ -135,7 +131,7 @@ def setGammaRamp(screenID, newRamp, nAttempts=3, xDisplay=None,
             elif gammaErrorPolicy == 'warn':
                 logging.warning(warn_msg.format(func=func))
 
-    if sys.platform.startswith('linux') and not _vmTesting:
+    if sys.platform.startswith('linux') and not systemtools.isVM_CI():
         newRamp = (numpy.around(65535 * newRamp)).astype(numpy.uint16)
         success = xf86vm.XF86VidModeSetGammaRamp(
             xDisplay, screenID, LUTlength,
@@ -149,7 +145,7 @@ def setGammaRamp(screenID, newRamp, nAttempts=3, xDisplay=None,
             elif gammaErrorPolicy == 'warn':
                 logging.warning(raise_msg.format(func=func))
 
-    elif _vmTesting:
+    elif systemtools.isVM_CI():
         logging.warn("It looks like we're running in a Virtual Machine. "
                      "Hardware gamma table cannot be set")
 
@@ -199,7 +195,7 @@ def getGammaRamp(screenID, xDisplay=None, gammaErrorPolicy=None):
             elif gammaErrorPolicy == 'warn':
                 logging.warning(warn_msg.format(func=func))
 
-    if sys.platform.startswith('linux') and not _vmTesting:
+    if sys.platform.startswith('linux') and not systemtools.isVM_CI():
         origramps = numpy.empty((3, rampSize), dtype=numpy.uint16)
         success = xf86vm.XF86VidModeGetGammaRamp(
             xDisplay, screenID, rampSize,
@@ -215,7 +211,7 @@ def getGammaRamp(screenID, xDisplay=None, gammaErrorPolicy=None):
         else:
             origramps = origramps/65535.0  # rescale to 0:1
 
-    elif _vmTesting:
+    elif systemtools.isVM_CI():
         logging.warn("It looks like we're running in a virtual machine. "
                      "Hardware gamma table cannot be retrieved")
         origramps = None
@@ -318,7 +314,7 @@ def getGammaRampSize(screenID, xDisplay=None, gammaErrorPolicy=None):
     if not gammaErrorPolicy:
         gammaErrorPolicy = defaultGammaErrorPolicy
 
-    if sys.platform == 'win32' or _vmTesting:
+    if sys.platform == 'win32' or systemtools.isVM_CI():
         # windows documentation (for SetDeviceGammaRamp) seems to indicate that
         # the LUT size is always 256
         rampSize = 256

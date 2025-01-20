@@ -5,7 +5,7 @@
 """
 
 # Part of the PsychoPy library
-# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2021 Open Science Tools Ltd.
+# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2024 Open Science Tools Ltd.
 # Distributed under the terms of the GNU General Public License (GPL).
 
 __all__ = [
@@ -49,23 +49,6 @@ from psychopy.tools.audiotools import *
 # audio library identifiers
 AUDIO_LIBRARY_PTB = 'ptb'  # PsychPortAudio from Psychtoolbox
 
-# Quality levels as strings and values. Used internally by the PsychoPy UI for
-# dropdowns and preferences. Persons using PsychoPy as a library would typically
-# use constants `SAMPLE_RATE_*` instead of looking up values in here.
-#
-# For voice recording applications, the recommended sample rate is `Voice`
-# (16kHz) and should appear as the default option in preferences and UI
-# dropdowns.
-#
-sampleRateQualityLevels = {
-    0: (SAMPLE_RATE_8kHz, 'Telephone/Two-way radio (8kHz)'),
-    1: (SAMPLE_RATE_16kHz, 'Voice (16kHz)'),  # <<< recommended for voice
-    2: (SAMPLE_RATE_44p1kHz, 'CD Audio (44.1kHz)'),
-    3: (SAMPLE_RATE_48kHz, 'DVD Audio (48kHz)'),  # <<< usually system default
-    4: (SAMPLE_RATE_96kHz, 'High-Def (96kHz)'),
-    5: (SAMPLE_RATE_192kHz, 'Ultra High-Def (192kHz)')
-}
-
 # Latency classes for the PsychPortAudio backend. These are used to set how
 # aggressive PsychPortAudio should be at minimizing sound latency and getting
 # precise timing. Exclusive mode `AUDIO_PTB_LATENCY_CLASS2` is usually used
@@ -96,7 +79,7 @@ runModeLevels = {
 }
 
 
-class AudioDeviceInfo(object):
+class AudioDeviceInfo:
     """Descriptor for an audio device (playback or recording) on this system.
 
     Properties associated with this class provide information about a specific
@@ -198,8 +181,8 @@ class AudioDeviceInfo(object):
 
     def __repr__(self):
         return (f"AudioDeviceInfo(deviceIndex={self.deviceIndex}, "
-                f"deviceName={self.deviceName}, "
-                f"hostAPIName={self.hostAPIName}, "
+                f"deviceName={repr(self.deviceName)}, "
+                f"hostAPIName={repr(self.hostAPIName)}, "
                 f"outputChannels={self.outputChannels}, "
                 f"outputLatency={repr(self.outputLatency)}, "
                 f"inputChannels={self.inputChannels}, "
@@ -357,7 +340,7 @@ class AudioDeviceInfo(object):
         return self.isPlayback and self.isCapture
 
 
-class AudioDeviceStatus(object):
+class AudioDeviceStatus:
     """Descriptor for audio device status information.
 
     Properties of this class are standardized on the status information returned
@@ -481,7 +464,7 @@ class AudioDeviceStatus(object):
                  cpuLoad=0.0,
                  predictedLatency=0.0,
                  latencyBias=0.0,
-                 sampleRate=SAMPLE_RATE_48kHz,
+                 sampleRate=SAMPLE_RATE_44p1kHz,
                  outDeviceIndex=0,
                  inDeviceIndex=0,
                  audioLib=u'Null Audio Library'):
@@ -863,7 +846,7 @@ class AudioDeviceStatus(object):
         self._inDeviceIndex = int(value)
 
 
-# Theses are used as sentinels or for testing. Instancing these here behaves as
+# These are used as sentinels or for testing. Instancing these here behaves as
 # a self-test, providing coverage to most of the setter methods when this module
 # is imported.
 #

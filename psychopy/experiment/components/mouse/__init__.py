@@ -2,26 +2,12 @@
 # -*- coding: utf-8 -*-
 
 # Part of the PsychoPy library
-# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2021 Open Science Tools Ltd.
+# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2024 Open Science Tools Ltd.
 # Distributed under the terms of the GNU General Public License (GPL).
 
-from __future__ import absolute_import, print_function
-from builtins import super  # provides Py3-style super() using python-future
-
-from os import path
 from pathlib import Path
 from psychopy.experiment.components import BaseComponent, Param, _translate
-from psychopy.localization import _localized as __localized
-_localized = __localized.copy()
 import re
-
-# only use _localized values for label values, nothing functional:
-_localized.update({'saveMouseState': _translate('Save mouse state'),
-                   'forceEndRoutineOnPress': _translate('End Routine on press'),
-                   'timeRelativeTo': _translate('Time relative to'),
-                   'Clickable stimuli': _translate('Clickable stimuli'),
-                   'Store params for clicked': _translate('Store params for clicked'),
-                   'New clicks only': _translate('New clicks only')})
 
 
 class MouseComponent(BaseComponent):
@@ -37,7 +23,8 @@ class MouseComponent(BaseComponent):
                  startType='time (s)', startVal=0.0,
                  stopType='duration (s)', stopVal=1.0,
                  startEstim='', durationEstim='',
-                 save='final', forceEndRoutineOnPress="any click",
+                 save='on click', forceEndRoutineOnPress="any click",
+                 storeCorrect=False, correctAns="",
                  timeRelativeTo='mouse onset'):
         super(MouseComponent, self).__init__(
             exp, parentName, name=name,
@@ -61,11 +48,11 @@ class MouseComponent(BaseComponent):
             "Routine?")
         self.params['saveMouseState'] = Param(
             save, valType='str', inputType="choice", categ='Data',
-            allowedVals=['final', 'on click', 'every frame', 'never'],
-            hint=msg,
-            label=_localized['saveMouseState'])
+            allowedVals=['final', 'on click', 'on valid click', 'every frame', 'never'],
+            hint=msg, direct=False,
+            label=_translate("Save mouse state"))
 
-        msg = _translate("Should a button press force the end of the routine"
+        msg = _translate("Should a button press force the end of the Routine"
                          " (e.g end the trial)?")
         if forceEndRoutineOnPress is True:
             forceEndRoutineOnPress = 'any click'
@@ -73,10 +60,10 @@ class MouseComponent(BaseComponent):
             forceEndRoutineOnPress = 'never'
         self.params['forceEndRoutineOnPress'] = Param(
             forceEndRoutineOnPress, valType='str', inputType="choice", categ='Basic',
-            allowedVals=['never', 'any click', 'valid click'],
-            updates='constant',
+            allowedVals=['never', 'any click', 'valid click', 'correct click'],
+            updates='constant', direct=False,
             hint=msg,
-            label=_localized['forceEndRoutineOnPress'])
+            label=_translate("End Routine on press"))
 
         msg = _translate("What should the values of mouse.time should be "
                          "relative to?")
@@ -84,28 +71,28 @@ class MouseComponent(BaseComponent):
             timeRelativeTo, valType='str', inputType="choice", categ='Data',
             allowedVals=['mouse onset', 'experiment', 'routine'],
             updates='constant',
-            hint=msg,
-            label=_localized['timeRelativeTo'])
-
+            hint=msg, direct=False,
+            label=_translate("Time relative to"))
 
         msg = _translate('If the mouse button is already down when we start '
                          'checking then wait for it to be released before '
                          'recording as a new click.'
                          )
         self.params['newClicksOnly'] = Param(
-            True, valType='bool', inputType="bool", categ='Data',
+            True, valType='bool', inputType="bool", categ='Basic',
             updates='constant',
             hint=msg,
-            label=_localized['New clicks only'])
+            label=_translate("New clicks only"))
+
         msg = _translate('A comma-separated list of your stimulus names that '
                          'can be "clicked" by the participant. '
                          'e.g. target, foil'
                          )
         self.params['clickable'] = Param(
-            '', valType='list', inputType="single", categ='Data',
+            '', valType='list', inputType="single", categ='Basic',
             updates='constant',
             hint=msg,
-            label=_localized['Clickable stimuli'])
+            label=_translate("Clickable stimuli"))
 
         msg = _translate('The params (e.g. name, text), for which you want '
                          'to store the current value, for the stimulus that was'
@@ -114,10 +101,35 @@ class MouseComponent(BaseComponent):
                          )
         self.params['saveParamsClickable'] = Param(
             'name,', valType='list', inputType="single", categ='Data',
-            updates='constant', allowedUpdates=[],
+            updates='constant', allowedUpdates=[], direct=False,
             hint=msg,
-            label=_localized['Store params for clicked'])
+            label=_translate("Store params for clicked"))
 
+        msg = _translate("Do you want to save the response as "
+                         "correct/incorrect?")
+        self.params['storeCorrect'] = Param(
+            storeCorrect, valType='bool', inputType="bool", allowedTypes=[], categ='Data',
+            updates='constant',
+            hint=msg,
+            label=_translate("Store correct"))
+
+        self.depends += [  # allows params to turn each other off/on
+            {"dependsOn": "storeCorrect",  # must be param name
+             "condition": "== True",  # val to check for
+             "param": "correctAns",  # param property to alter
+             "true": "enable",  # what to do with param if condition is True
+             "false": "disable",  # permitted: hide, show, enable, disable
+             }
+        ]
+
+        msg = _translate(
+            "What is the 'correct' object? To specify an area, remember that you can create a shape Component with 0 "
+            "opacity.")
+        self.params['correctAns'] = Param(
+            correctAns, valType='list', inputType="single", allowedTypes=[], categ='Data',
+            updates='constant',
+            hint=msg, direct=False,
+            label=_translate("Correct answer"))
 
     @property
     def _clickableParamsList(self):
@@ -131,45 +143,112 @@ class MouseComponent(BaseComponent):
         code = (
             "# check if the mouse was inside our 'clickable' objects\n"
             "gotValidClick = False\n"
-            "try:\n"
-            "    iter(%(clickable)s)\n"
-            "    clickableList = %(clickable)s\n"
-            "except:\n"
-            "    clickableList = [%(clickable)s]\n"
+            "clickableList = environmenttools.getFromNames(%(clickable)s, namespace=locals())\n"
             "for obj in clickableList:\n"
+            "    # is this object clicked on?\n"
             "    if obj.contains(%(name)s):\n"
             "        gotValidClick = True\n")
         buff.writeIndentedLines(code % self.params)
 
-        buff.setIndentLevel(+2, relative=True)
-        code = ''
+        # store clicked object if there was one
+        code = ""
         for paramName in self._clickableParamsList:
-            code += "%s.clicked_%s.append(obj.%s)\n" %(self.params['name'],
-                                                     paramName, paramName)
+            code += (
+                    f"        %(name)s.clicked_{paramName}.append(obj.{paramName})\n"
+                )
         buff.writeIndentedLines(code % self.params)
-        buff.setIndentLevel(-2, relative=True)
+
+        # if storing every click and got an invalid click, store None for all params when there was no valid click
+        if self.params['saveMouseState'].val not in ['on valid click', 'never']:
+            code = "if not gotValidClick:\n"
+            for paramName in self._clickableParamsList:
+                code += (
+                    f"    %(name)s.clicked_{paramName}.append(None)\n"
+                )
+        buff.writeIndentedLines(code % self.params)
+
+    def _writeCorrectAnsCode(self, buff):
+        code = (
+            "# check whether click was in correct object\n"
+            "if gotValidClick:\n"
+            "    _corr = 0\n"
+            "    _corrAns = environmenttools.getFromNames(%(correctAns)s, namespace=locals())\n"
+            "    for obj in _corrAns:\n"
+            "        # is this object clicked on?\n"
+            "        if obj.contains(%(name)s):\n"
+            "            _corr = 1\n"
+            "    %(name)s.corr.append(_corr)\n"
+        )
+        # Write force end code
+        if self.params['forceEndRoutineOnPress'] == 'correct click':
+            code += (
+            "    if corr:\n"
+            "        continueRoutine = False  # end routine on correct answer\n"
+            )
+        buff.writeIndentedLines(code % self.params)
+
+    def _writeCorrectAnsCodeJS(self, buff):
+        code = (
+            "// check whether click was in correct object\n"
+            "if (gotValidClick) {\n"
+            "    corr = 0;\n"
+            "    corrAns = eval( %(correctAns)s);\n"
+            "    for (let obj of [corrAns]) {\n"
+            "        if (obj.contains(%(name)s)) {\n"
+            "            corr = 1;\n"
+            "        };\n"
+            "    };\n"
+            "    %(name)s.corr.push(corr);\n"
+        )
+        # Write force end code
+        if self.params['forceEndRoutineOnPress'] == 'correct click':
+            code += (
+            "    if (corr) {\n"
+            "        // end routine on correct answer\n"
+            "        continueRoutine = false;\n"
+            "    };\n"
+            )
+        buff.writeIndentedLines(code % self.params)
+        # Close if statement
+        code = (
+            "};\n"
+        )
+        buff.writeIndentedLines(code % self.params)
 
     def _writeClickableObjectsCodeJS(self, buff):
         # code to check if clickable objects were clicked
         code = (
             "// check if the mouse was inside our 'clickable' objects\n"
             "gotValidClick = false;\n"
-            "for (const obj of [{clickable}]) {{\n"
-            "  if (obj.contains({name})) {{\n"
-            "    gotValidClick = true;\n")
-        buff.writeIndentedLines(code.format(name=self.params['name'],
-                                            clickable=self.params['clickable'].val))
-        buff.setIndentLevel(+2, relative=True)
-        dedent = 2
-        code = ''
+            "%(name)s.clickableObjects = eval(%(clickable)s)\n;"
+            "// make sure the mouse's clickable objects are an array\n"
+            "if (!Array.isArray(%(name)s.clickableObjects)) {\n"
+            "    %(name)s.clickableObjects = [%(name)s.clickableObjects];\n"
+            "}\n"
+            "// iterate through clickable objects and check each\n"
+            "for (const obj of %(name)s.clickableObjects) {\n"
+            "    if (obj.contains(%(name)s)) {\n"
+            "        gotValidClick = true;\n"
+        )
         for paramName in self._clickableParamsList:
-            code += "%s.clicked_%s.push(obj.%s)\n" % (self.params['name'],
-                                                        paramName, paramName)
-
+            code += (
+                f"        %(name)s.clicked_{paramName}.push(obj.{paramName});\n"
+            )
+        code += (
+            "    }\n"
+            "}\n"
+        )
         buff.writeIndentedLines(code % self.params)
-        for dents in range(dedent):
-            buff.setIndentLevel(-1, relative=True)
-            buff.writeIndented('}\n')
+
+        # if storing every click and got an invalid click, store None for all params when there was no valid click
+        if self.params['saveMouseState'].val not in ['on valid click', 'never']:
+            code = "if (!gotValidClick) {\n"
+            for paramName in self._clickableParamsList:
+                code += (
+                    f"    %(name)s.clicked_{paramName}.push(null);\n"
+                )
+            code += "}\n"
+        buff.writeIndentedLines(code % self.params)
 
     def writeInitCode(self, buff):
         code = ("%(name)s = event.Mouse(win=win)\n"
@@ -191,13 +270,17 @@ class MouseComponent(BaseComponent):
         # we need more than one
         code = ("# setup some python lists for storing info about the "
                 "%(name)s\n")
-        if self.params['saveMouseState'].val in ['every frame', 'on click']:
+        if self.params['saveMouseState'].val in ['every frame', 'on click', 'on valid click']:
             code += ("%(name)s.x = []\n"
                      "%(name)s.y = []\n"
                      "%(name)s.leftButton = []\n"
                      "%(name)s.midButton = []\n"
                      "%(name)s.rightButton = []\n"
                      "%(name)s.time = []\n")
+        if self.params['storeCorrect']:
+            code += (
+                "%(name)s.corr = []\n"
+            )
         if self.params['clickable'].val:
             for clickableObjParam in self._clickableParamsList:
                 code += "%(name)s.clicked_{} = []\n".format(clickableObjParam)
@@ -213,7 +296,7 @@ class MouseComponent(BaseComponent):
         """Write the code that will be called at the start of the routine"""
 
         code = ("// setup some python lists for storing info about the %(name)s\n")
-        if self.params['saveMouseState'].val in ['every frame', 'on click']:
+        if self.params['saveMouseState'].val in ['every frame', 'on click', 'on valid click']:
             code += ("// current position of the mouse:\n"
                      "%(name)s.x = [];\n"
                      "%(name)s.y = [];\n"
@@ -221,6 +304,11 @@ class MouseComponent(BaseComponent):
                      "%(name)s.midButton = [];\n"
                      "%(name)s.rightButton = [];\n"
                      "%(name)s.time = [];\n")
+
+        if self.params['storeCorrect']:
+            code += (
+                "%(name)s.corr = [];\n"
+            )
 
         if self.params['clickable'].val:
             for clickableObjParam in self._clickableParamsList:
@@ -244,42 +332,40 @@ class MouseComponent(BaseComponent):
         elif timeRelative in ['routine', 'mouse onset']:
             self.clockStr = '%s.mouseClock' % self.params['name'].val
 
+        buff.writeIndented("# *%s* updates\n" % self.params['name'])
+
+        # writes an if statement to determine whether to draw etc
+        indented = self.writeStartTestCode(buff)
+        if indented:
+            code = ""
+            if self.params['timeRelativeTo'].val.lower() == 'mouse onset':
+                code += "%(name)s.mouseClock.reset()\n"
+
+            if self.params['newClicksOnly']:
+                code += (
+                    "prevButtonState = %(name)s.getPressed()"
+                    "  # if button is down already this ISN'T a new click\n")
+            else:
+                code += (
+                    "prevButtonState = [0, 0, 0]"
+                    "  # if now button is down we will treat as 'new' click\n")
+            buff.writeIndentedLines(code % self.params)
+
+        # to get out of the if statement
+        buff.setIndentLevel(-indented, relative=True)
+
+        # test for stop (only if there was some setting for duration or stop)
+        indented = self.writeStopTestCode(buff)
+        # to get out of the if statement
+        buff.setIndentLevel(-indented, relative=True)
+
         # only write code for cases where we are storing data as we go (each
         # frame or each click)
 
         # might not be saving clicks, but want it to force end of trial
         if (self.params['saveMouseState'].val not in
-                ['every frame', 'on click'] and forceEnd == 'never'):
+                ['every frame', 'on click', 'on valid click'] and forceEnd == 'never'):
             return
-
-        buff.writeIndented("# *%s* updates\n" % self.params['name'])
-
-        # writes an if statement to determine whether to draw etc
-        self.writeStartTestCode(buff)
-        code = ("%(name)s.status = STARTED\n")
-        if self.params['timeRelativeTo'].val.lower() == 'mouse onset':
-            code += "%(name)s.mouseClock.reset()\n"
-
-        if self.params['newClicksOnly']:
-            code += (
-                "prevButtonState = %(name)s.getPressed()"
-                "  # if button is down already this ISN'T a new click\n")
-        else:
-            code += (
-                "prevButtonState = [0, 0, 0]"
-                "  # if now button is down we will treat as 'new' click\n")
-        buff.writeIndentedLines(code % self.params)
-
-        # to get out of the if statement
-        buff.setIndentLevel(-1, relative=True)
-
-        # test for stop (only if there was some setting for duration or stop)
-        if self.params['stopVal'].val not in ['', None, -1, 'None']:
-            # writes an if statement to determine whether to draw etc
-            self.writeStopTestCode(buff)
-            buff.writeIndented("%(name)s.status = FINISHED\n" % self.params)
-            # to get out of the if statement
-            buff.setIndentLevel(-2, relative=True)
 
         # if STARTED and not FINISHED!
         code = ("if %(name)s.status == STARTED:  "
@@ -300,22 +386,36 @@ class MouseComponent(BaseComponent):
             buff.writeIndentedLines(code % self.params)
             buff.setIndentLevel(1, relative=True)
             dedent += 1
+            # keep track of whether something's been written
+            hasContent = False
+            # write code to check clickable stim, if there are any
             if self.params['clickable'].val:
                 self._writeClickableObjectsCode(buff)
+                hasContent = True
+            # write code to check correct stim, if there are any
+            if self.params['storeCorrect']:
+                self._writeCorrectAnsCode(buff)
+                hasContent = True
+            # if current if statement has no content, add a pass
+            if not hasContent:
+                buff.writeIndentedLines(
+                    "pass"
+                )
+
             return buff, dedent
 
         # No mouse tracking, end routine on any or valid click
-        if self.params['saveMouseState'].val == 'never' and forceEnd in ['any click', 'valid click']:
+        if self.params['saveMouseState'].val in ['never', 'final'] and forceEnd != "never":
             buff, dedentAtEnd = _buttonPressCode(buff, dedentAtEnd)
 
             if forceEnd == 'valid click':
                     # does valid response end the trial?
-                    code = ("if gotValidClick:  # abort routine on response\n"
-                            "    continueRoutine = False\n")
+                    code = ("if gotValidClick:  \n"
+                            "    continueRoutine = False  # end routine on response\n")
                     buff.writeIndentedLines(code)
                     buff.setIndentLevel(-dedentAtEnd, relative=True)
             else:
-                buff.writeIndented('continueRoutine = False')
+                buff.writeIndented('continueRoutine = False  # end routine on response')
                 buff.setIndentLevel(-dedentAtEnd, relative=True)
 
         elif self.params['saveMouseState'].val != 'never':
@@ -334,28 +434,50 @@ class MouseComponent(BaseComponent):
                 buff.writeIndentedLines(mouseCode)
 
             # Continuous mouse tracking for all button press
-            if forceEnd == 'never' and self.params['saveMouseState'].val in ['on click']:
+            if forceEnd == 'never' and self.params['saveMouseState'].val in ['on click', 'on valid click']:
                 buff, dedentAtEnd = _buttonPressCode(buff, dedentAtEnd)
-                buff.writeIndentedLines(mouseCode)
+                if self.params['saveMouseState'].val in ['on click']:
+                    buff.writeIndentedLines(mouseCode)
+                elif self.params['clickable'].val and self.params['saveMouseState'].val in ['on valid click']:
+                    code = (
+                        "if gotValidClick:\n"
+                    )
+                    buff.writeIndentedLines(code)
+                    buff.setIndentLevel(+1, relative=True)
+                    buff.writeIndentedLines(mouseCode)
+                    buff.setIndentLevel(-1, relative=True)
 
             # Mouse tracking for events that end routine
-            elif forceEnd in ['any click', 'valid click']:
+            elif forceEnd != "never":
                 buff, dedentAtEnd = _buttonPressCode(buff, dedentAtEnd)
                 # Save all mouse events on button press
                 if self.params['saveMouseState'].val in ['on click']:
                     buff.writeIndentedLines(mouseCode)
+                elif self.params['clickable'].val and self.params['saveMouseState'].val in ['on valid click']:
+                    code = (
+                        "if gotValidClick:\n"
+                    )
+                    buff.writeIndentedLines(code)
+                    buff.setIndentLevel(+1, relative=True)
+                    buff.writeIndentedLines(mouseCode)
+                    buff.setIndentLevel(-1, relative=True)
                 # also write code about clicked objects if needed.
                 if self.params['clickable'].val:
                     # does valid response end the trial?
                     if forceEnd == 'valid click':
-                        code = ("if gotValidClick:  # abort routine on response\n"
-                                "    continueRoutine = False\n")
+                        code = ("if gotValidClick:\n"
+                                "    continueRoutine = False  # end routine on response\n")
                         buff.writeIndentedLines(code)
                 # does any response end the trial?
                 if forceEnd == 'any click':
-                    code = ("# abort routine on response\n"
-                            "continueRoutine = False\n")
+                    code = ("\n"
+                            "continueRoutine = False  # end routine on response\n")
                     buff.writeIndentedLines(code)
+                elif forceEnd == 'correct click':
+                    code = (
+                        "if %(name)s.corr and %(name)s.corr[-1]:\n"
+                        "    continueRoutine = False  # end routine on response\n"
+                    )
                 else:
                     pass # forceEnd == 'never'
                 # 'if' statement of the time test and button check
@@ -376,99 +498,115 @@ class MouseComponent(BaseComponent):
 
         # might not be saving clicks, but want it to force end of trial
         if (self.params['saveMouseState'].val not in
-                ['every frame', 'on click'] and forceEnd == 'never'):
+                ['every frame', 'on click', 'on valid click'] and forceEnd == 'never'):
             return
         buff.writeIndented("// *%s* updates\n" % self.params['name'])
 
         # writes an if statement to determine whether to draw etc
-        self.writeStartTestCodeJS(buff)
-        code = "%(name)s.status = PsychoJS.Status.STARTED;\n"
-        if self.params['timeRelativeTo'].val.lower() == 'mouse onset':
-            code += "%(name)s.mouseClock.reset();\n" % self.params
+        indented = self.writeStartTestCodeJS(buff)
+        if indented:
+            code = "%(name)s.status = PsychoJS.Status.STARTED;\n"
+            if self.params['timeRelativeTo'].val.lower() == 'mouse onset':
+                code += "%(name)s.mouseClock.reset();\n" % self.params
 
-        if self.params['newClicksOnly']:
-            code += (
-                "prevButtonState = %(name)s.getPressed();"
-                "  // if button is down already this ISN'T a new click\n")
-        else:
-            code += (
-                "prevButtonState = [0, 0, 0];"
-                "  // if now button is down we will treat as 'new' click\n")
-        code+=("}\n")
-        buff.writeIndentedLines(code % self.params)
+            if self.params['newClicksOnly']:
+                code += (
+                    "prevButtonState = %(name)s.getPressed();"
+                    "  // if button is down already this ISN'T a new click\n")
+            else:
+                code += (
+                    "prevButtonState = [0, 0, 0];"
+                    "  // if now button is down we will treat as 'new' click\n")
+            buff.writeIndentedLines(code % self.params)
 
-        # to get out of the if statement
-        buff.setIndentLevel(-1, relative=True)
+            # to get out of the if statement
+            for n in range(indented):
+                buff.setIndentLevel(-1, relative=True)
+                buff.writeIndented("}\n")
 
         # test for stop (only if there was some setting for duration or stop)
-        if self.params['stopVal'].val not in ['', None, -1, 'None']:
-            # writes an if statement to determine whether to draw etc
-            self.writeStopTestCodeJS(buff)
-            buff.writeIndented("%(name)s.status = PsychoJS.Status.FINISHED;\n"
-                               "  }\n" % self.params)
+        indented = self.writeStopTestCodeJS(buff)
+        if indented:
+            buff.writeIndented("%(name)s.status = PsychoJS.Status.FINISHED;\n" % self.params)
             # to get out of the if statement
-            buff.setIndentLevel(-1, relative=True)
+            for n in range(indented):
+                buff.setIndentLevel(-1, relative=True)
+                buff.writeIndented("}\n")
 
         # if STARTED and not FINISHED!
-        code = ("if (%(name)s.status === PsychoJS.Status.STARTED) {  "
-                "// only update if started and not finished!\n")
-        buff.writeIndented(code % self.params)
-        buff.setIndentLevel(1, relative=True)  # to get out of if statement
-        dedentAtEnd = 1  # keep track of how far to dedent later
+        indented = self.writeActiveTestCodeJS(buff)
+        if indented:
+            # write param checking code
+            if (self.params['saveMouseState'].val in ['on click', 'on valid click'] or forceEnd in ['any click', 'correct click', 'valid click']):
+                code = ("_mouseButtons = %(name)s.getPressed();\n")
+                buff.writeIndentedLines(code % self.params)
+                # buff.setIndentLevel(1, relative=True)
+                # dedentAtEnd += 1
+                code = "if (!_mouseButtons.every( (e,i,) => (e == prevButtonState[i]) )) { // button state changed?\n"
+                buff.writeIndented(code)
+                buff.setIndentLevel(1, relative=True)
+                indented += 1
+                buff.writeIndented("prevButtonState = _mouseButtons;\n")
+                code = ("if (_mouseButtons.reduce( (e, acc) => (e+acc) ) > 0) { // state changed to a new click\n")
+                buff.writeIndentedLines(code % self.params)
+                buff.setIndentLevel(1, relative=True)
+                indented += 1
 
-        # write param checking code
-        if (self.params['saveMouseState'].val == 'on click'
-                or forceEnd in ['any click', 'valid click']):
-            code = ("_mouseButtons = %(name)s.getPressed();\n")
-            buff.writeIndentedLines(code % self.params)
-            # buff.setIndentLevel(1, relative=True)
-            # dedentAtEnd += 1
-            code = "if (!_mouseButtons.every( (e,i,) => (e == prevButtonState[i]) )) { // button state changed?\n"
-            buff.writeIndented(code)
-            buff.setIndentLevel(1, relative=True)
-            dedentAtEnd += 1
-            buff.writeIndented("prevButtonState = _mouseButtons;\n")
-            code = ("if (_mouseButtons.reduce( (e, acc) => (e+acc) ) > 0) { // state changed to a new click\n")
-            buff.writeIndentedLines(code % self.params)
-            buff.setIndentLevel(1, relative=True)
-            dedentAtEnd += 1
+            elif self.params['saveMouseState'].val == 'every frame':
+                code = "_mouseButtons = %(name)s.getPressed();\n" % self.params
+                buff.writeIndented(code)
 
-        elif self.params['saveMouseState'].val == 'every frame':
-            code = "_mouseButtons = %(name)s.getPressed();\n" % self.params
-            buff.writeIndented(code)
+            # also write code about clicked objects if needed.
+            if self.params['clickable'].val:
+                self._writeClickableObjectsCodeJS(buff)
 
-        # only do this if buttons were pressed
-        if self.params['saveMouseState'].val in ['on click', 'every frame']:
-            code = ("_mouseXYs = %(name)s.getPos();\n"
-                    "%(name)s.x.push(_mouseXYs[0]);\n"
-                    "%(name)s.y.push(_mouseXYs[1]);\n"
-                    "%(name)s.leftButton.push(_mouseButtons[0]);\n"
-                    "%(name)s.midButton.push(_mouseButtons[1]);\n"
-                    "%(name)s.rightButton.push(_mouseButtons[2]);\n" %
-                    self.params)
-            code += ("%s.time.push(%s.getTime());\n" % (self.params['name'], self.clockStr))
-            buff.writeIndentedLines(code)
+            # also write code about correct objects if needed
+            if self.params['storeCorrect']:
+                self._writeCorrectAnsCodeJS(buff)
 
-        # also write code about clicked objects if needed.
-        if self.params['clickable'].val:
-            self._writeClickableObjectsCodeJS(buff)
+            if self.params['saveMouseState'].val in ['on click', 'on valid click', 'every frame']:
+                storeCode = (
+                        "_mouseXYs = %(name)s.getPos();\n"
+                        "%(name)s.x.push(_mouseXYs[0]);\n"
+                        "%(name)s.y.push(_mouseXYs[1]);\n"
+                        "%(name)s.leftButton.push(_mouseButtons[0]);\n"
+                        "%(name)s.midButton.push(_mouseButtons[1]);\n"
+                        "%(name)s.rightButton.push(_mouseButtons[2]);\n"
+                        % self.params
+                )
+                storeCode += ("%s.time.push(%s.getTime());\n" % (self.params['name'], self.clockStr))
+                if self.params['clickable'].val and self.params['saveMouseState'].val in ['on valid click']:
+                    code = (
+                        "if (gotValidClick === true) { \n"
+                    )
+                    buff.writeIndentedLines(code)
+                    buff.setIndentLevel(+1, relative=True)
+                    buff.writeIndentedLines(storeCode)
+                    buff.setIndentLevel(-1, relative=True)
+                    code = (
+                        "}\n"
+                    )
+                    buff.writeIndentedLines(code)
+                else:
+                    buff.writeIndentedLines(storeCode)
 
-            # does the response end the trial?
-        if forceEnd == 'any click':
-            code = ("// abort routine on response\n"
-                    "continueRoutine = false;\n")
-            buff.writeIndentedLines(code)
+                # does the response end the trial?
+            if forceEnd == 'any click':
+                code = ("// end routine on response\n"
+                        "continueRoutine = false;\n")
+                buff.writeIndentedLines(code)
 
-        elif forceEnd == 'valid click':
-            code = ("if (gotValidClick === true) { // abort routine on response\n"
-                    "  continueRoutine = false;\n"
-                    "}\n")
-            buff.writeIndentedLines(code)
-        else:
-            pass  # forceEnd == 'never'
-        for thisDedent in range(dedentAtEnd):
-            buff.setIndentLevel(-1, relative=True)
-            buff.writeIndentedLines('}')
+            elif forceEnd == 'valid click':
+                code = ("if (gotValidClick === true) { // end routine on response\n"
+                        "  continueRoutine = false;\n"
+                        "}\n")
+                buff.writeIndentedLines(code)
+            else:
+                pass  # forceEnd == 'never'
+            # to get out of the if statement
+            for n in range(indented):
+                buff.setIndentLevel(-1, relative=True)
+                buff.writeIndented("}\n")
 
     def writeRoutineEndCode(self, buff):
         # some shortcuts
@@ -515,6 +653,10 @@ class MouseComponent(BaseComponent):
                     "{loopName}.addData('{name}.midButton', buttons[1])\n" 
                     "{loopName}.addData('{name}.rightButton', buttons[2])\n"
                 )
+                if self.params['storeCorrect']:
+                    code += (
+                        "{loopName}.addData('{name}.corr', {name}.corr)\n"
+                    )
                 buff.writeIndentedLines(
                     code.format(loopName=currLoop.params['name'],
                                 name=name))
@@ -535,6 +677,8 @@ class MouseComponent(BaseComponent):
             # buff.writeIndented("# save %(name)s data\n" %(self.params))
             mouseDataProps = ['x', 'y', 'leftButton', 'midButton',
                              'rightButton', 'time']
+            if self.params['storeCorrect']:
+                mouseDataProps += ['corr']
             # possibly add clicked params if we have clickable objects
             if self.params['clickable'].val:
                 for paramName in self._clickableParamsList:
@@ -548,18 +692,14 @@ class MouseComponent(BaseComponent):
                     buff.writeIndented(code)
                 else:
                     # we only had one click so don't return a list
-                    code = ("if len(%s.%s): %s.addData('%s.%s', %s.%s[0])\n" %
-                            (name, property,
-                             currLoop.params['name'], name,
+                    code = ("%s.addData('%s.%s', %s.%s)\n" %
+                            (currLoop.params['name'], name,
                              property, name, property))
                     buff.writeIndented(code)
 
 
         # get parent to write code too (e.g. store onset/offset times)
         super().writeRoutineEndCode(buff)
-
-        if currLoop.params['name'].val == self.exp._expHandler.name:
-            buff.writeIndented("%s.nextEntry()\n" % self.exp._expHandler.name)
 
     def writeRoutineEndCodeJS(self, buff):
         """Write code at end of routine"""
@@ -599,6 +739,10 @@ class MouseComponent(BaseComponent):
                     "psychoJS.experiment.addData('{name}.midButton', _mouseButtons[1]);\n"
                     "psychoJS.experiment.addData('{name}.rightButton', _mouseButtons[2]);\n"
                 )
+                if self.params['storeCorrect']:
+                    code += (
+                        "psychoJS.experiment.addData('{name}.corr', {name}.corr);\n"
+                    )
                 buff.writeIndentedLines(code.format(name=name))
 
                 # For clicked objects...
@@ -615,20 +759,15 @@ class MouseComponent(BaseComponent):
             # buff.writeIndented("# save %(name)s data\n" %(self.params))
             mouseDataProps = ['x', 'y', 'leftButton', 'midButton',
                               'rightButton', 'time']
+            if self.params['storeCorrect']:
+                mouseDataProps += ['corr']
             # possibly add clicked params if we have clickable objects
             if self.params['clickable'].val:
                 for paramName in self._clickableParamsList:
                     mouseDataProps.append("clicked_{}".format(paramName))
             # use that set of properties to create set of addData commands
             for property in mouseDataProps:
-                if store == 'every frame' or forceEnd == "never":
-                    code = ("psychoJS.experiment.addData('%s.%s', %s.%s);\n" %
-                            (name, property, name, property))
-                    buff.writeIndented(code)
-                else:
-                    # we only had one click so don't return a list
-                    code = ("if (%s.%s) {"
-                            "  psychoJS.experiment.addData('%s.%s', %s.%s[0])};\n"
-                            % (name, property, name, property, name, property))
-                    buff.writeIndented(code)
+                code = ("psychoJS.experiment.addData('%s.%s', %s.%s);\n" %
+                        (name, property, name, property))
+                buff.writeIndented(code)
             buff.writeIndentedLines("\n")

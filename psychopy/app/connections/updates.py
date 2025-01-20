@@ -2,13 +2,9 @@
 # -*- coding: utf-8 -*-
 
 # Part of the PsychoPy library
-# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2021 Open Science Tools Ltd.
+# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2024 Open Science Tools Ltd.
 # Distributed under the terms of the GNU General Public License (GPL).
 
-from __future__ import absolute_import, division, print_function
-from past.builtins import unicode
-
-from builtins import object
 import sys
 import re
 import glob
@@ -16,7 +12,7 @@ import time
 import zipfile
 import platform
 import os
-from pkg_resources import parse_version
+from packaging.version import Version
 import wx
 import wx.lib.filebrowsebutton
 try:
@@ -29,11 +25,7 @@ from .. import dialogs
 from psychopy.localization import _translate
 from psychopy import logging
 from psychopy import web
-from psychopy import constants
-if constants.PY3:
-    import io
-else:
-    import StringIO as io
+import io
 urllib = web.urllib
 
 versionURL = "https://www.psychopy.org/version.txt"
@@ -58,8 +50,7 @@ def getLatestVersionInfo(app=None):
     for line in page.readlines():
         # in some odd circumstances (wifi hotspots) you can fetch a
         # page that is not the correct URL but a redirect
-        if constants.PY3:
-            line = line.decode()  # convert from a byte to a str
+        line = line.decode()  # convert from a byte to a str
         if line.find(':') == -1:
             return -1
             # this will succeed if every line has a key
@@ -70,7 +61,7 @@ def getLatestVersionInfo(app=None):
     return latest
 
 
-class Updater(object):
+class Updater():
 
     def __init__(self, app=None, runningVersion=None):
         """The updater will check for updates and download/install as needed.
@@ -91,7 +82,7 @@ class Updater(object):
             self.runningVersion = runningVersion
 
         # self.headers = {'User-Agent': psychopy.constants.PSYCHOPY_USERAGENT}
-        self.latest = None
+        self.latest = getLatestVersionInfo()
         if web.proxies is None:
             web.setupProxy()
 
@@ -125,8 +116,8 @@ class Updater(object):
             raise(err)
         skip = self.app.prefs.appData['skipVersion'] == self.latest['version']
         if newer and not skip:
-            if (parse_version(self.latest['lastUpdatable'])
-                    <= parse_version(self.runningVersion)):
+            if (Version(self.latest['lastUpdatable'])
+                    <= Version(self.runningVersion)):
                 # go to the updating window
                 confirmDlg = SuggestUpdateDialog(
                     self.latest, self.runningVersion)
@@ -281,10 +272,12 @@ class InstallUpdateDialog(wx.Dialog):
             self.latest = app.updater.latest
         self.runningVersion = app.updater.runningVersion
         wx.Dialog.__init__(self, parent, ID,
-                           title=_translate('PsychoPy Updates'),
-                           size=(100, 200))
+                           title=_translate('PsychoPy Updates'))
 
+        borderSizer = wx.BoxSizer(wx.VERTICAL)
         mainSizer = wx.BoxSizer(wx.VERTICAL)
+        self.SetSizer(borderSizer)
+        borderSizer.Add(mainSizer, border=12, proportion=1, flag=wx.ALL | wx.EXPAND)
         # set the actual content of status msg later in self.updateStatus()
         self.statusMessage = wx.StaticText(
             self, -1, "msg", style=wx.ALIGN_CENTER)
@@ -294,7 +287,7 @@ class InstallUpdateDialog(wx.Dialog):
         self.useLatestBtn = wx.RadioButton(self, -1, msg,
                                            style=wx.RB_GROUP)
         self.Bind(wx.EVT_RADIOBUTTON, self.onRadioSelect, self.useLatestBtn)
-        self.progressBar = wx.Gauge(self, -1, 100, size=(250, 25))
+        self.progressBar = wx.Gauge(self, -1, 100, size=(250, 36))
         mainSizer.Add(self.useLatestBtn,
                       flag=wx.ALIGN_LEFT | wx.ALL, border=5)
         mainSizer.Add(self.progressBar, flag=wx.EXPAND | wx.ALL, border=5)
@@ -304,11 +297,10 @@ class InstallUpdateDialog(wx.Dialog):
         self.useZipBtn = wx.RadioButton(self, -1, msg)
         self.Bind(wx.EVT_RADIOBUTTON, self.onRadioSelect, self.useZipBtn)
         self.fileBrowseCtrl = wx.lib.filebrowsebutton.FileBrowseButton(
-            self, -1, size=(450, -1), changeCallback=self.onFileBrowse,
+            self, -1, size=(450, 48), changeCallback=self.onFileBrowse,
             fileMask='*.zip')
         mainSizer.Add(self.useZipBtn, flag=wx.ALIGN_LEFT | wx.ALL, border=5)
-        mainSizer.Add(self.fileBrowseCtrl,
-                      flag=wx.ALIGN_LEFT | wx.ALL, border=5)
+        mainSizer.Add(self.fileBrowseCtrl, flag=wx.ALIGN_LEFT | wx.ALL, border=5)
         # ctrls for buttons (install/cancel)
         self.installBtn = wx.Button(self, -1, _translate('Install'))
         self.Bind(wx.EVT_BUTTON, self.onInstall, self.installBtn)
@@ -316,12 +308,18 @@ class InstallUpdateDialog(wx.Dialog):
         self.cancelBtn = wx.Button(self, -1, _translate('Close'))
         self.Bind(wx.EVT_BUTTON, self.onCancel, self.cancelBtn)
         btnSizer = wx.BoxSizer(wx.HORIZONTAL)
-        btnSizer.Add(self.installBtn)
-        btnSizer.Add(self.cancelBtn, flag= wx.LEFT, border=5)
-        mainSizer.Add(btnSizer, flag= wx.ALL, border=5)
+        btnSizer.AddStretchSpacer()
+        if sys.platform == "win32":
+            btns = [self.installBtn, self.cancelBtn]
+        else:
+            btns = [self.cancelBtn, self.installBtn]
+        btnSizer.Add(btns[0], 0, flag=wx.LEFT, border=5)
+        btnSizer.Add(btns[1], 0, flag=wx.LEFT, border=5)
+        mainSizer.AddStretchSpacer()
+        mainSizer.Add(btnSizer, flag=wx.ALL | wx.EXPAND, border=5)
 
-        self.SetSizerAndFit(mainSizer)
-        self.SetAutoLayout(True)
+        self.Layout()
+        self.Fit()
 
         # positioning and sizing
         self.updateStatus()
@@ -340,8 +338,8 @@ class InstallUpdateDialog(wx.Dialog):
             msg += _translate("Check proxy settings in preferences.")
             self.statusMessage.SetLabel(msg)
             return
-        elif (parse_version(self.latest['version'])
-                  < parse_version(self.runningVersion)):
+        elif (Version(self.latest['version'])
+                  < Version(self.runningVersion)):
             msg = _translate(
                 "You are running PsychoPy (%(running)s), which is ahead of "
                 "the latest official version (%(latest)s)") % {
@@ -356,8 +354,8 @@ class InstallUpdateDialog(wx.Dialog):
                 "PsychoPy v%(latest)s is available\nYou are running v%(running)s")
             msg = txt % {'latest': self.latest['version'],
                          'running': self.runningVersion}
-            if (parse_version(self.latest['lastUpdatable'])
-                                  <= parse_version(self.runningVersion)):
+            if (Version(self.latest['lastUpdatable'])
+                                  <= Version(self.runningVersion)):
                 msg += _translate("\nYou can update to the latest version automatically")
             else:
                 msg += _translate("\nYou cannot update to the latest version "
@@ -374,6 +372,7 @@ class InstallUpdateDialog(wx.Dialog):
         else:
             self.currentSelection = self.useLatestBtn
             self.useLatestBtn.SetValue(True)
+        self.Layout()
         self.Fit()
         # this will enable/disable additional controls for the above:
         self.onRadioSelect()
@@ -448,10 +447,7 @@ class InstallUpdateDialog(wx.Dialog):
         otherwise try and retrieve a version number from zip file name
         """
         info = ""  # return this at the end
-        if constants.PY3:
-            zfileIsName = type(zfile) == str
-        else:
-            zfileIsName = type(zfile) in (str, unicode)
+        zfileIsName = type(zfile) == str
         if os.path.isfile(zfile) and zfileIsName:
             # zfile is filename not an actual file
             if v is None:  # try and deduce it
@@ -624,10 +620,10 @@ def sendUsageStats():
         OSXver, junk, architecture = platform.mac_ver()
         systemInfo = "OSX_%s_%s" % (OSXver, architecture)
     elif sys.platform.startswith('linux'):
-        from distro import linux_distribution
+        import distro
         systemInfo = '%s_%s_%s' % (
             'Linux',
-            ':'.join([x for x in linux_distribution() if x != '']),
+            ':'.join([x for x in [distro.name(), distro.version(), distro.codename()] if x != '']),
             platform.release())
         if len(systemInfo) > 30:  # if it's too long PHP/SQL fails to store!?
             systemInfo = systemInfo[0:30]
@@ -635,7 +631,7 @@ def sendUsageStats():
         systemInfo = "win32_v" + platform.version()
     else:
         systemInfo = platform.system() + platform.release()
-    u = "https://www.psychopy.org/usage.php?date=%s&sys=%s&version=%s&misc=%s"
+    u = "https://usage.psychopy.org/submit.php?date=%s&sys=%s&version=%s&misc=%s"
     URL = u % (dateNow, systemInfo, v, miscInfo)
     try:
         req = urllib.request.Request(URL)

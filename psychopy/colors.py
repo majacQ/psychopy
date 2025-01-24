@@ -3,7 +3,15 @@
 
 """Classes and functions for working with colors.
 """
-from __future__ import absolute_import, print_function
+
+__all__ = [
+    "colorExamples",
+    "colorNames",
+    "colorSpaces",
+    "isValidColor",
+    "hex2rgb255",
+    "Color"
+]
 
 import re
 from math import inf
@@ -30,7 +38,8 @@ colorExamples = {
 
 # Dict of named colours
 colorNames = {
-    "none": (0, 0, 0),
+    "none": (0, 0, 0, 0),
+    "transparent": (0, 0, 0, 0),
     "aliceblue": (0.882352941176471, 0.945098039215686, 1),
     "antiquewhite": (0.96078431372549, 0.843137254901961, 0.686274509803922),
     "aqua": (-1, 1, 1),
@@ -231,20 +240,41 @@ for val in alphaSpaces:
     nonAlphaSpaces.remove(val)
 
 
-class Color(object):
-    """A class to store colour details, knows what colour space it's in and can
+class Color:
+    """A class to store color details, knows what colour space it's in and can
     supply colours in any space.
+
+    Parameters
+    ----------
+    color : ArrayLike or None
+        Color values (coordinates). Value must be in a format applicable to the
+        specified `space`.
+    space : str or None
+        Colorspace to interpret the value of `color` as being within.
+    contrast : int or float
+        Factor to modulate the contrast of the color.
+    conematrix : ArrayLike or None
+        Cone matrix for colorspaces which require it. Must be a 3x3 array.
 
     """
     def __init__(self, color=None, space=None, contrast=None, conematrix=None):
         self._cache = {}
+        self._renderCache = {}
         self.contrast = contrast if isinstance(contrast, (int, float)) else 1
         self.alpha = 1
         self.valid = False
         self.conematrix = conematrix
+
+        # defined here but set later
+        self._requested = None
+        self._requestedSpace = None
+
         self.set(color=color, space=space)
 
     def validate(self, color, space=None):
+        """
+        Check that a color value is valid in the given space, or all spaces if space==None.
+        """
         # Treat None as a named color
         if color is None:
             color = "none"
@@ -258,6 +288,9 @@ class Color(object):
             color = np.reshape(color, (1, -1))
         # If data type is string, check against named and hex as these override other spaces
         if color.dtype.char == 'U':
+            # Remove superfluous quotes
+            for i in range((len(color[:, 0]))):
+                color[i, 0] = color[i, 0].replace("\"", "").replace("'", "")
             # If colors are all named, override color space
             namedMatch = np.vectorize(
                 lambda col: bool(colorSpaces['named'].fullmatch(
@@ -317,7 +350,6 @@ class Color(object):
     def set(self, color=None, space=None):
         """Set the colour of this object - essentially the same as what happens
         on creation, but without having to initialise a new object.
-
         """
         # If input is a Color object, duplicate all settings
         if isinstance(color, Color):
@@ -341,22 +373,40 @@ class Color(object):
             raise ValueError("{} is not a valid color space.".format(space))
 
     def render(self, space='rgb'):
+        """Apply contrast to the base color value and return the adjusted color
+        value.
+        """
         if space not in colorSpaces:
             raise ValueError(f"{space} is not a valid color space")
-        adj = np.clip(self.rgb * self.contrast, -1, 1)
+        # If value is cached, return it rather than doing calculations again
+        if space in self._renderCache:
+            return self._renderCache[space]
+        # Transform contrast to match rgb
+        contrast = self.contrast
+        contrast = np.reshape(contrast, (-1, 1))
+        contrast = np.hstack((contrast, contrast, contrast))
+        # Multiply
+        adj = np.clip(self.rgb * contrast, -1, 1)
         buffer = self.copy()
         buffer.rgb = adj
-        return getattr(buffer, space)
+        self._renderCache[space] = getattr(buffer, space)
+        return self._renderCache[space]
 
     def __repr__(self):
-        """If colour is printed, it will display its class and value"""
+        """If colour is printed, it will display its class and value.
+        """
         if self.valid:
             if self.named:
-                return f"<{self.__class__.__module__}.{self.__class__.__name__}: {self.named}>"
+                return (f"<{self.__class__.__module__}."
+                        f"{self.__class__.__name__}: {self.named}, "
+                        f"alpha={self.alpha}>")
             else:
-                return f"<{self.__class__.__module__}.{self.__class__.__name__}: {tuple(np.round(self.rgba, 2))}>"
+                return (f"<{self.__class__.__module__}."
+                        f"{self.__class__.__name__}: "
+                        f"{tuple(np.round(self.rgba, 2))}>")
         else:
-            return f"<{self.__class__.__module__}.{self.__class__.__name__}: Invalid>"
+            return (f"<{self.__class__.__module__}."
+                    f"{self.__class__.__name__}: Invalid>")
 
     def __bool__(self):
         """Determines truth value of object"""
@@ -369,9 +419,12 @@ class Color(object):
         else:
             return int(bool(self.rgb.shape))
 
-    # ---rich comparisons---
+    # --------------------------------------------------------------------------
+    # Rich comparisons
+    #
+
     def __eq__(self, target):
-        """== will compare RGBA values, rounded to 2dp"""
+        """`==` will compare RGBA values, rounded to 2dp"""
         if isinstance(target, Color):
             return np.all(np.round(target.rgba, 2) == np.round(self.rgba, 2))
         elif target == None:
@@ -380,10 +433,13 @@ class Color(object):
             return False
 
     def __ne__(self, target):
-        """!= will return the opposite of =="""
+        """`!=` will return the opposite of `==`"""
         return not self == target
 
-    #--operators---
+    # --------------------------------------------------------------------------
+    # Operators
+    #
+
     def __add__(self, other):
         buffer = self.copy()
         # If target is a list or tuple, convert it to an array
@@ -417,19 +473,68 @@ class Color(object):
         # If target is a Color object, add together the rgba values
         if isinstance(other, Color):
             if len(self) == len(other):
-                buffer.rgba = self.rgba - other.rgba
+                buffer.rgb = self.rgb - other.rgb
         return buffer
+
+    # --------------------------------------------------------------------------
+    # Methods and properties
+    #
 
     def copy(self):
         """Return a duplicate of this colour"""
+        return self.__copy__()
+
+    def __copy__(self):
+        return self.__deepcopy__()
+
+    def __deepcopy__(self):
         dupe = self.__class__(
             self._requested, self._requestedSpace, self.contrast)
         dupe.rgba = self.rgba
         dupe.valid = self.valid
         return dupe
 
+    def getReadable(self, contrast=4.5/21):
+        """
+        Get a color which will stand out and be easily readable against this
+        one. Useful for choosing text colors based on background color.
+
+        Parameters
+        ----------
+        contrast : float
+            Desired perceived contrast between the two colors, between 0 (the
+            same color) and 1 (as opposite as possible). Default is the
+            w3c recommended minimum of 4.5/21 (dividing by 21 to adjust for
+            sRGB units).
+
+        Returns
+        -------
+        colors.Color
+            A contrasting color to this color.
+        """
+        # adjust contrast to sRGB
+        contrast *= 21
+        # get value as rgb1
+        rgb = self.rgb1
+        # convert to srgb
+        srgb = rgb**2.2 * [0.2126, 0.7151, 0.0721]
+        # apply contrast adjustment
+        if np.sum(srgb) < 0.5:
+            srgb = (srgb + 0.05) * contrast
+        else:
+            srgb = (srgb + 0.05) / contrast
+        # convert back
+        rgb = (srgb / [0.2126, 0.7151, 0.0721])**(1/2.2)
+        # cap
+        rgb = np.clip(rgb, 0, 1)
+        # Return new color
+        return Color(rgb, "rgb1")
+
     @property
     def alpha(self):
+        """How opaque (1) or transparent (0) this color is. Synonymous with
+        `opacity`.
+        """
         return self._alpha
 
     @alpha.setter
@@ -437,22 +542,41 @@ class Color(object):
         # Treat 1x1 arrays as a float
         if isinstance(value, np.ndarray):
             if value.size == 1:
-                value = float(value)
-        # Clip value(s) to within range
-        if isinstance(value, np.ndarray):
-            value = np.clip(value, 0, 1)
-        elif isinstance(value, (int, float)):
-            value = min(value,1)
-            value = max(value,0)
+                value = float(value[0])
         else:
-            raise TypeError(
-                "Could not set alpha as value `{}` of type `{}`".format(
-                    value, type(value).__name__))
+            try:
+                value = float(value)  # If coercible to float, do so
+            except (TypeError, ValueError) as err:
+                raise TypeError(
+                    "Could not set alpha as value `{}` of type `{}`".format(
+                        value, type(value).__name__
+                    )
+                )
+        value = np.clip(value, 0, 1)  # Clip value(s) to within range
+        # Set value
         self._alpha = value
+        # Clear render cache
+        self._renderCache = {}
+
+    @property
+    def contrast(self):
+        if hasattr(self, "_contrast"):
+            return self._contrast
+
+    @contrast.setter
+    def contrast(self, value):
+        # Set value
+        self._contrast = value
+        # Clear render cache
+        self._renderCache = {}
 
     @property
     def opacity(self):
+        """How opaque (1) or transparent (0) this color is (`float`). Synonymous
+        with `alpha`.
+        """
         return self.alpha
+
     @opacity.setter
     def opacity(self, value):
         self.alpha = value
@@ -476,6 +600,9 @@ class Color(object):
     # Lingua franca is rgb
     @property
     def rgba(self):
+        """Color value expressed as an RGB triplet from -1 to 1, with alpha
+        values (0 to 1).
+        """
         return self._appendAlpha('rgb')
 
     @rgba.setter
@@ -484,6 +611,8 @@ class Color(object):
 
     @property
     def rgb(self):
+        """Color value expressed as an RGB triplet from -1 to 1.
+        """
         if not self.valid:
             return
         if hasattr(self, '_franca'):
@@ -497,15 +626,19 @@ class Color(object):
         # Validate
         color, space = self.validate(color, space='rgb')
         if space != 'rgb':
-            setattr(self, space)
+            setattr(self, space, color)
             return
         # Set color
         self._franca = color
         # Clear outdated values from cache
         self._cache = {'rgb': color}
+        self._renderCache = {}
 
     @property
     def rgba255(self):
+        """Color value expressed as an RGB triplet from 0 to 255, with alpha
+        value (0 to 1).
+        """
         return self._appendAlpha('rgb255')
 
     @rgba255.setter
@@ -514,6 +647,8 @@ class Color(object):
 
     @property
     def rgb255(self):
+        """Color value expressed as an RGB triplet from 0 to 255.
+        """
         if not self.valid:
             return
         # Recalculate if not cached
@@ -526,15 +661,19 @@ class Color(object):
         # Validate
         color, space = self.validate(color, space='rgb255')
         if space != 'rgb255':
-            setattr(self, space)
+            setattr(self, space, color)
             return
         # Iterate through values and do conversion
         self.rgb = 2 * (color / 255 - 0.5)
         # Clear outdated values from cache
         self._cache = {'rgb255': color}
+        self._renderCache = {}
 
     @property
     def rgba1(self):
+        """Color value expressed as an RGB triplet from 0 to 1, with alpha value
+        (0 to 1).
+        """
         return self._appendAlpha('rgb1')
 
     @rgba1.setter
@@ -543,6 +682,8 @@ class Color(object):
 
     @property
     def rgb1(self):
+        """Color value expressed as an RGB triplet from 0 to 1.
+        """
         if not self.valid:
             return
         # Recalculate if not cached
@@ -555,15 +696,19 @@ class Color(object):
         # Validate
         color, space = self.validate(color, space='rgb1')
         if space != 'rgb1':
-            setattr(self, space)
+            setattr(self, space, color)
             return
         # Iterate through values and do conversion
         self.rgb = 2 * (color - 0.5)
         # Clear outdated values from cache
         self._cache = {'rgb1': color}
+        self._renderCache = {}
 
     @property
     def hex(self):
+        """Color value expressed as a hex string. Can be a '#' followed by 6
+        values from 0 to F (e.g. #F2545B).
+        """
         if not self.valid:
             return
         if 'hex' not in self._cache:
@@ -598,7 +743,7 @@ class Color(object):
         # Validate
         color, space = self.validate(color, space='hex')
         if space != 'hex':
-            setattr(self, space)
+            setattr(self, space, color)
             return
         if len(color) > 1:
             # Handle arrays
@@ -629,9 +774,12 @@ class Color(object):
         self.rgb255 = rgb255
         # Clear outdated values from cache
         self._cache = {'hex': color}
+        self._renderCache = {}
 
     @property
     def named(self):
+        """The name of this color, if it has one (`str`).
+        """
         if 'named' not in self._cache:
             self._cache['named'] = None
             # If alpha is 0, then we know that the color is None
@@ -669,7 +817,7 @@ class Color(object):
         # Validate
         color, space = self.validate(color=color, space='named')
         if space != 'named':
-            setattr(self, space)
+            setattr(self, space, color)
             return
         # Retrieve named colour
         if len(color) > 1:
@@ -688,9 +836,12 @@ class Color(object):
                 self.alpha = 0
         # Clear outdated values from cache
         self._cache = {'named': color}
+        self._renderCache = {}
 
     @property
     def hsva(self):
+        """Color value expressed as an HSV triplet, with alpha value (0 to 1).
+        """
         return self._appendAlpha('hsv')
 
     @hsva.setter
@@ -699,6 +850,8 @@ class Color(object):
 
     @property
     def hsv(self):
+        """Color value expressed as an HSV triplet.
+        """
         if 'hsva' not in self._cache:
             self._cache['hsv'] = ct.rgb2hsv(self.rgb)
         return self._cache['hsv']
@@ -708,15 +861,18 @@ class Color(object):
         # Validate
         color, space = self.validate(color=color, space='hsv')
         if space != 'hsv':
-            setattr(self, space)
+            setattr(self, space, color)
             return
         # Apply via rgba255
         self.rgb = ct.hsv2rgb(color)
         # Clear outdated values from cache
         self._cache = {'hsv': color}
+        self._renderCache = {}
 
     @property
     def lmsa(self):
+        """Color value expressed as an LMS triplet, with alpha value (0 to 1).
+        """
         return self._appendAlpha('lms')
 
     @lmsa.setter
@@ -725,6 +881,8 @@ class Color(object):
 
     @property
     def lms(self):
+        """Color value expressed as an LMS triplet.
+        """
         if 'lms' not in self._cache:
             self._cache['lms'] = ct.rgb2lms(self.rgb)
         return self._cache['lms']
@@ -734,15 +892,18 @@ class Color(object):
         # Validate
         color, space = self.validate(color=color, space='lms')
         if space != 'lms':
-            setattr(self, space)
+            setattr(self, space, color)
             return
         # Apply via rgba255
         self.rgb = ct.lms2rgb(color, self.conematrix)
         # Clear outdated values from cache
         self._cache = {'lms': color}
+        self._renderCache = {}
 
     @property
     def dkla(self):
+        """Color value expressed as a DKL triplet, with alpha value (0 to 1).
+        """
         return self._appendAlpha('dkl')
 
     @dkla.setter
@@ -751,6 +912,8 @@ class Color(object):
 
     @property
     def dkl(self):
+        """Color value expressed as a DKL triplet.
+        """
         if 'dkl' not in self._cache:
             raise NotImplementedError(
                 "Conversion from rgb to dkl is not yet implemented.")
@@ -761,15 +924,19 @@ class Color(object):
         # Validate
         color, space = self.validate(color=color, space='dkl')
         if space != 'dkl':
-            setattr(self, space)
+            setattr(self, space, color)
             return
         # Apply via rgba255
         self.rgb = ct.dkl2rgb(color, self.conematrix)
         # Clear outdated values from cache
         self._cache = {'dkl': color}
+        self._renderCache = {}
 
     @property
     def dklaCart(self):
+        """Color value expressed as a cartesian DKL triplet, with alpha value
+        (0 to 1).
+        """
         return self.dklCart
 
     @dklaCart.setter
@@ -778,6 +945,8 @@ class Color(object):
 
     @property
     def dklCart(self):
+        """Color value expressed as a cartesian DKL triplet.
+        """
         if 'dklCart' not in self._cache:
             self._cache['dklCart'] = ct.rgb2dklCart(self.rgb)
         return self._cache['dklCart']
@@ -787,15 +956,19 @@ class Color(object):
         # Validate
         color, space = self.validate(color=color, space='dklCart')
         if space != 'dkl':
-            setattr(self, space)
+            setattr(self, space, color)
             return
         # Apply via rgba255
         self.rgb = ct.dklCart2rgb(color, self.conematrix)
         # Clear outdated values from cache
         self._cache = {'dklCart': color}
+        self._renderCache = {}
 
     @property
     def srgb(self):
+        """
+        Color value expressed as an sRGB triplet
+        """
         if 'srgb' not in self._cache:
             self._cache['srgb'] = ct.srgbTF(self.rgb)
         return self._cache['srgb']
@@ -805,12 +978,13 @@ class Color(object):
         # Validate
         color, space = self.validate(color=color, space='srgb')
         if space != 'srgb':
-            setattr(self, space)
+            setattr(self, space, color)
             return
         # Apply via rgba255
         self.rgb = ct.srgbTF(color, reverse=True)
         # Clear outdated values from cache
         self._cache = {'srgb': color}
+        self._renderCache = {}
 
     # removing for now
     # @property
@@ -824,17 +998,19 @@ class Color(object):
     #     # Validate
     #     color, space = self.validate(color=color, space='rec709TF')
     #     if space != 'rec709TF':
-    #         setattr(self, space)
+    #         setattr(self, space, color)
     #         return
     #     # Apply via rgba255
     #     self.rgb = ct.rec709TF(color, reverse=True)
     #     # Clear outdated values from cache
     #     self._cache = {'rec709TF': color}
+    #     self._renderCache = {}
 
 
 # ------------------------------------------------------------------------------
 # Legacy functions
 #
+
 # Old reference tables
 colors = colorNames
 # colorsHex = {key: Color(key, 'named').hex for key in colors}
@@ -843,7 +1019,9 @@ colors = colorNames
 
 # Old conversion functions
 def hex2rgb255(hexColor):
-    """Convert a hex color string (e.g. "#05ff66") into an rgb triplet
+    """Depreciated as of 2021.0
+
+    Converts a hex color string (e.g. "#05ff66") into an rgb triplet
     ranging from 0:255
     """
     col = Color(hexColor, 'hex')
@@ -867,3 +1045,7 @@ def isValidColor(color, space='rgb'):
         return bool(buffer)
     except:
         return False
+
+
+if __name__ == "__main__":
+    pass

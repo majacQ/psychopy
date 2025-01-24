@@ -32,10 +32,6 @@ Typical usage::
         win.flip()  # flipping implicitly updates the joystick info
 """
 
-from __future__ import absolute_import, print_function
-
-from builtins import range
-from builtins import object
 try:
     import pygame.joystick
     havePygame = True
@@ -75,14 +71,16 @@ def getNumJoysticks():
         pygame.joystick.init()
         return pygame.joystick.get_count()
 
+
 if havePyglet:
-    class PygletDispatcher():
+    class PygletDispatcher:
         def dispatch_events(self):
             pyglet_app.platform_event_loop.step(timeout=0.001)
 
     pyglet_dispatcher = PygletDispatcher()
 
-class Joystick(object):
+
+class Joystick:
 
     def __init__(self, id):
         """An object to control a multi-axis joystick or gamepad.
@@ -107,7 +105,10 @@ class Joystick(object):
                               "etc...)")
             else:
                 self._device = joys[id]
-                self._device.open()
+                try:
+                    self._device.open()
+                except pyglet_input.DeviceOpenException as e:
+                    pass
                 self.name = self._device.device.name
             if len(visual.openWindows) == 0:
                 logging.error(

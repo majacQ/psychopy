@@ -4,13 +4,11 @@
 """Classes and functions for the coder source tree."""
 
 # Part of the PsychoPy library
-# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2021 Open Science Tools Ltd.
+# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2024 Open Science Tools Ltd.
 # Distributed under the terms of the GNU General Public License (GPL).
 
-from __future__ import absolute_import, print_function
 from collections import deque
-from ..themes import ThemeMixin
-from psychopy.app.coder.folding import getFolds
+from ..themes import icons, colors, handlers
 
 import wx
 import wx.stc
@@ -20,17 +18,18 @@ import string
 
 
 CPP_DEFS = ['void', 'int', 'float', 'double', 'short', 'byte', 'struct', 'enum',
-            'function', 'class']  # javascript tokens
+            'function', 'async function', 'class']  # javascript tokens
 PYTHON_DEFS = ['def', 'class']
 
 
-class SourceTreePanel(wx.Panel):
+class SourceTreePanel(wx.Panel, handlers.ThemeMixin):
     """Panel for the source tree browser."""
     def __init__(self, parent, frame):
         wx.Panel.__init__(self, parent, -1)
         self.parent = parent
         self.coder = frame
         self.app = frame.app
+        self.tabIcon = "coderclass"
 
         # double buffered better rendering except if retina
         self.SetDoubleBuffered(self.coder.IsDoubleBuffered())
@@ -61,27 +60,25 @@ class SourceTreePanel(wx.Panel):
 
         self._applyAppTheme()
 
-    def _applyAppTheme(self, target=None):
-        cs = ThemeMixin.appColors
-        iconCache = self.app.iconCache
-        self.srcTree.SetOwnBackgroundColour(cs['tab_bg'])
-        self.srcTree.SetOwnForegroundColour(cs['text'])
+    def _applyAppTheme(self):
+        self.srcTree.SetOwnBackgroundColour(colors.app['tab_bg'])
+        self.srcTree.SetOwnForegroundColour(colors.app['text'])
 
         # get graphics for toolbars and tree items
         self._treeImgList = wx.ImageList(16, 16)
         self._treeGfx = {
             'class': self._treeImgList.Add(
-                iconCache.getBitmap(name='coderclass.png', size=16)),
+                icons.ButtonIcon('coderclass', size=16).bitmap),
             'def': self._treeImgList.Add(
-                iconCache.getBitmap(name='coderfunc.png', size=16)),
+                icons.ButtonIcon('coderfunc', size=16).bitmap),
             'attr': self._treeImgList.Add(
-                iconCache.getBitmap(name='codervar.png', size=16)),
+                icons.ButtonIcon('codervar', size=16).bitmap),
             'pyModule': self._treeImgList.Add(
-                iconCache.getBitmap(name='coderpython.png', size=16)),
+                icons.ButtonIcon('coderpython', size=16).bitmap),
             'jsModule': self._treeImgList.Add(
-                iconCache.getBitmap(name='coderjs.png', size=16)),
+                icons.ButtonIcon('coderjs', size=16).bitmap),
             'noDoc': self._treeImgList.Add(
-                iconCache.getBitmap(name='docclose.png', size=16))
+                icons.ButtonIcon('docclose', size=16).bitmap)
             # 'import': self._treeImgList.Add(
             #     wx.Bitmap(os.path.join(rc, 'coderimport16.png'), wx.BITMAP_TYPE_PNG)),
             # 'treeFolderClosed': _treeImgList.Add(
@@ -119,7 +116,7 @@ class SourceTreePanel(wx.Panel):
             self.coder.currentDoc.expandedItems[itemData] = False
 
     def GetScrollVert(self):
-        """Get the vertical scrolling position fo the tree. This is used to
+        """Get the vertical scrolling position for the tree. This is used to
         keep track of where we are in the tree by the code editor. This prevents
         the tree viewer from moving back to the top when returning to a
         document, which may be jarring for users."""
@@ -162,7 +159,7 @@ class SourceTreePanel(wx.Panel):
         # represents the hierarchy of the document. This system is dead simple,
         # determining what's a function/class based on what the Scintilla lexer
         # thinks should be folded. This is really fast and works most of the
-        # time (prefectly for Python). In the future, we may need to specify
+        # time (perfectly for Python). In the future, we may need to specify
         # additional code to handle languages which don't have strict whitespace
         # requirements.
         #
@@ -182,7 +179,14 @@ class SourceTreePanel(wx.Panel):
         lastItem = None
         for df in foldLines:
             lineText = doc.GetLineText(df[1]).lstrip()
-            if not any([lineText.startswith(i) for i in kwrds]):
+            # work out which keyword the line starts with
+            kwrd = None
+            for i in kwrds:
+                i += " "  # add a space to avoid e.g. `defaultKeyboard` being read as a keyword
+                if lineText.startswith(i):
+                    kwrd = i
+            # skip if it starts with no keywords
+            if kwrd is None:
                 continue
 
             if lastItem is not None:
@@ -191,14 +195,18 @@ class SourceTreePanel(wx.Panel):
 
             # slice off comment
             lineText = lineText.split('#')[0]
+            # split into tokens
             lineTokens = [
                 tok.strip(stripChars) for tok in re.split(
                     r' |\(|\)', lineText) if tok]
 
-            # for some reason the line is valid but cannot be parsed, ignore it
+            # take value before keyword end as def type, value after as def name
+            kwrdEnd = len(re.findall(r' |\(|\)', kwrd))
             try:
-                defType, defName = lineTokens[:2]
+                defType = lineTokens[kwrdEnd-1]
+                defName = lineTokens[kwrdEnd]
             except ValueError:
+                # if for some reason the line is valid but cannot be parsed, ignore it
                 continue
 
             lastItem = (defType, defName, df[1], df[0])

@@ -1,16 +1,15 @@
 import ast
-import re
 
 from numpy import array
 from esprima import parseScript
 
 from psychopy.tools import monitorunittools
 from psychopy.alerts._alerts import alert
-from psychopy.visual.textbox2.fontmanager import FontManager
+from psychopy.tools.fontmanager import FontManager
 
 fontMGR = FontManager()
 
-class TestWin(object):
+class TestWin:
     """
     Creates a false window with necessary attributes for converting component
     Parameters to pixels.
@@ -260,7 +259,7 @@ def testDisabled(component):
         return
 
     if component.params['disabled'].val:
-        alert(4305, component)
+        alert(4305, component, strFields={'name': component.params['name']})
 
 def testFont(component):
     """

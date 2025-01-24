@@ -27,7 +27,8 @@ alertLog : List
 
 _activeAlertHandlers = []
 
-class AlertCatalog(object):
+
+class AlertCatalog:
     """A class for loading alerts from the alerts catalogue yaml file"""
     def __init__(self):
         self.alert = self.load()
@@ -66,7 +67,7 @@ class AlertCatalog(object):
         return alertDict
 
 
-class AlertEntry(object):
+class AlertEntry:
     """An Alerts data class holding alert data as attributes
 
     Attributes
@@ -117,10 +118,14 @@ class AlertEntry(object):
         else:
             self.name = None
 
+        # _translate(catalog.alert[code]['msg']) works, but string literals
+        # in _translate() (i.e., 'msg' in this case) cause false detection 
+        # by pybabel.
+        msg = catalog.alert[code]['msg']
         if strFields:
-            self.msg = _translate(catalog.alert[code]['msg']).format(**strFields)
+            self.msg = _translate(msg).format(**strFields)
         else:
-            self.msg = _translate(catalog.alert[code]['msg'])
+            self.msg = _translate(msg)
 
         if trace:
             self.trace = ''.join(traceback.format_exception(

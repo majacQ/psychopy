@@ -5,14 +5,11 @@
 """
 
 # Part of the PsychoPy library
-# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2021 Open Science Tools Ltd.
+# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2024 Open Science Tools Ltd.
 # Distributed under the terms of the GNU General Public License (GPL).
 
 # Author: Jeremy Gray, Oct 2012; localization 2014
 
-from __future__ import absolute_import, division, print_function
-
-from builtins import map, str, range, object
 from pyglet.gl import gl_info
 import os
 import sys
@@ -20,52 +17,20 @@ import wx
 import numpy as np
 import platform
 import codecs
-from pkg_resources import parse_version
+from packaging.version import Version
 
-if parse_version(wx.__version__) < parse_version('2.9'):
+if Version(wx.__version__) < Version('2.9'):
     tmpApp = wx.PySimpleApp()
 else:
     tmpApp = wx.App(False)
 from psychopy.localization import _translate
 from psychopy import (info, data, visual, gui, core, __version__,
-                      prefs, event, constants)
-
-# set values, using a form that poedit can discover:
-_localized = {
-    'Benchmark': _translate('Benchmark'),
-    'benchmark version': _translate('benchmark version'),
-    'full-screen': _translate('full-screen'),
-    'dots_circle': _translate('dots_circle'),
-    'dots_square': _translate('dots_square'),
-    'available memory': _translate('available memory'),
-    'python version': _translate('python version'),
-    'locale': _translate('locale'),
-    'Visual': _translate('Visual'),
-    'openGL version': _translate('openGL version'),
-    'openGL vendor': _translate('openGL vendor'),
-    'screen size': _translate('screen size'),
-    'have shaders': _translate('have shaders'),
-    'refresh stability (SD)': _translate('refresh stability (SD)'),
-    'no dropped frames': _translate('no dropped frames'),
-    'pyglet avbin': _translate('pyglet avbin'),
-    'Audio': _translate('Audio'),
-    'microphone latency': _translate('microphone latency'),
-    'microphone': _translate('microphone'),
-    'speakers latency': _translate('speakers latency'),
-    'speakers': _translate('speakers'),
-    'Numeric': _translate('Numeric'),
-    'System': _translate('System'),
-    'platform': _translate('platform'),
-    'internet access': _translate('internet access'),
-    'auto proxy': _translate('auto proxy'),
-    'proxy setting': _translate('proxy setting'),
-    'background processes': _translate('background processes'),
-    'CPU speed test': _translate('CPU speed test'),
-    'visual sync (refresh)': _translate('visual sync (refresh)')}
+                      prefs, event)
 # can't just do the following, or messes up poedit autodiscovery:
 # _localized = {k: _translate(k) for k in _loKeys}
 
-class BaseWizard(object):
+
+class BaseWizard():
     """Base class of ConfigWizard and BenchmarkWizard.
     """
     def __init__(self):
@@ -123,7 +88,7 @@ class BaseWizard(object):
             'prefs.html#application-settings-app">Preferences -> App</a>')
         report.append(('locale', items['systemLocale'], msg, False))
         msg = ''
-        v = parse_version
+        v = Version
         thisV = v(items['pythonVersion'])
         if (thisV < v('2.7') or (v('3.0') <= thisV < v('3.6'))
             ):
@@ -224,7 +189,7 @@ class BaseWizard(object):
         nDropped = sum(intervalsMS > (1.5 * median))
         if nDropped:
             msg = _translate(
-                'Warning: could not keep up during <a href="http://'
+                'Warning: could not keep up during <a href="https://'
                 'www.psychopy.org/api/visual/dotstim.html">DotStim</a>'
                 ' with 100 random dots.')
             warn = True
@@ -313,26 +278,21 @@ class BaseWizard(object):
         # ----- IMPORTS (relevant for developers & non-StandAlone): -----
         if verbose:  # always False for a real first-run
             report.append((_translate('Python packages'), '', '', False))
-            packages = ['PIL', 'openpyxl', 'lxml', 'setuptools', 'pytest',
+            packages = ['PIL', 'openpyxl', 'setuptools', 'pytest',
                         'sphinx', 'psignifit', 'pyserial', 'pp',
                         'pynetstation', 'labjack']
             if sys.platform == 'win32':
                 packages.append('pywin32')
                 packages.append('winioport')
 
-            if constants.PY3:
-                pkgError = ModuleNotFoundError
-            else:
-                pkgError = ImportError
+            pkgError = ModuleNotFoundError
             for pkg in packages:
                 try:
                     if pkg == 'PIL':
                         import PIL
                         ver = PIL.__version__
-                    # elif pkg == 'lxml':
-                    #
                     elif pkg == 'pynetstation':
-                        from psychopy.hardware import egi
+                        import egi_pynetstation
                         ver = 'import ok'
                     elif pkg == 'pyserial':
                         import serial
@@ -543,10 +503,10 @@ class ConfigWizard(BaseWizard):
                 <li> On Windows, don't use the windows option to check for updates
                   - it can report that there are no updates available.
                 <li> If your card is made by NVIDIA, go to
-                  <a href="http://www.nvidia.com/Drivers">the NVIDIA website</a>
+                  <a href="https://www.nvidia.com/download/index.aspx">the NVIDIA website</a>
                   and use the 'auto detect' option. Try here for
-                  <a href="http://support.amd.com/">ATI / Radeon drivers</a>. Or try
-                  <a href="http://www.google.com/search?q=download+drivers+%(card2)s">
+                  <a href="https://www.amd.com/fr/support">ATI / Radeon drivers</a>. Or try
+                  <a href="https://www.google.com/search?q=download+drivers+%(card2)s">
                   this google search</a> [google.com].
                 <li> Download and install the driver.
                 <li> Reboot the computer.

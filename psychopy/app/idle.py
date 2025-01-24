@@ -2,11 +2,8 @@
 # -*- coding: utf-8 -*-
 
 # Part of the PsychoPy library
-# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2021 Open Science Tools Ltd.
+# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2024 Open Science Tools Ltd.
 # Distributed under the terms of the GNU General Public License (GPL).
-
-from __future__ import absolute_import, division, print_function
-
 import threading
 import time
 from collections import OrderedDict
@@ -85,12 +82,43 @@ tasks['getPavloviaUser'] = {
 currentTask = None
 
 
+def addTask(taskName, func, tstart=None, tend=None, thread=True):
+    """Add an idle task.
+    
+    Parameters
+    ----------
+    taskName : str
+        Name of the task.
+    func : function
+        Function to be executed.
+    tstart : float, optional
+        Start time of the task.
+    tend : float, optional
+        End time of the task.
+    thread : bool, optional
+        Whether to run the task in a separate thread.
+    
+    """
+    global tasks
+    if taskName in tasks:
+        logging.warning('Task {} already exists'.format(taskName))
+        return
+
+    tasks[taskName] = {
+        'status': NOT_STARTED,
+        'func': func,
+        'tstart': tstart, 
+        'tEnd': tend,
+        'thread': thread,
+    }
+
+
 def doIdleTasks(app=None):
     global currentTask
 
     if currentTask and currentTask['thread'] and \
             currentTask['thread'].is_alive():
-        # is currently tunning in a thread
+        # is currently running in a thread
         return 0
 
     for taskName in tasks:

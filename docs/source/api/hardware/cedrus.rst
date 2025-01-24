@@ -1,7 +1,7 @@
 Cedrus (response boxes)
 =============================================
 
-The pyxid package, written by Cedrus, is included in the Standalone PsychoPy distributions. See https://github.com/cedrus-opensource/pyxid for further info.
+The pyxid package, written by Cedrus, is included in the Standalone |PsychoPy| distributions.
 
 Example usage::
 
@@ -21,14 +21,4 @@ Example usage::
                 response = dev.get_next_response()
                 # do something with the response
 
-Useful functions
-------------------
-
-.. automodule:: pyxid2
-    :members:
-
-Device classes
----------------------------
-
-.. autoclass:: pyxid2.XidDevice
-	:members:
+See https://github.com/cedrus-opensource/pyxid for further info.

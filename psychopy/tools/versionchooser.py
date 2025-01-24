@@ -2,24 +2,24 @@
 # -*- coding: utf-8 -*-
 
 # Part of the PsychoPy library
-# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2021 Open Science Tools Ltd.
+# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2024 Open Science Tools Ltd.
 # Distributed under the terms of the GNU General Public License (GPL).
 """PsychoPy Version Chooser to specify version within experiment scripts.
 """
 
-from __future__ import absolute_import, print_function
-
 import os
 import sys
+import re
 import subprocess  # for git commandline invocation
+from collections import OrderedDict
 from subprocess import CalledProcessError
 import psychopy  # for currently loaded version
 from psychopy import prefs
-from psychopy import logging, tools, web, constants
-from pkg_resources import parse_version
-from packaging.version import parse as parse_version
-if constants.PY3:
-    from importlib import reload
+# the following will all have been imported so import here and reload later
+from psychopy import logging, tools, web, constants, preferences, __version__
+from packaging.version import Version
+from importlib import reload
+from packaging.version import Version, InvalidVersion, VERSION_PATTERN
 
 USERDIR = prefs.paths['userPrefsDir']
 VER_SUBDIR = 'versions'
@@ -29,6 +29,146 @@ VERSIONSDIR = os.path.join(USERDIR, VER_SUBDIR)
 _localVersionsCache = []
 _remoteVersionsCache = []
 
+# define ranges of PsychoPy versions which support each Python version
+versionMap = OrderedDict({
+    Version('2.7'): (Version("0.0"), Version("2020.2.0")),
+    Version('3.6'): (Version("1.9"), Version("2022.1.0")),
+    Version('3.8'): (Version("2022.1.0"), None),
+    Version('3.10'): (Version("2023.2.0"), None),
+})
+# fill out intermediate versions
+for n in range(13):
+    v = Version(f"3.{n}")
+    av = max([key for key in versionMap if key <= v])
+    versionMap[v] = versionMap[av]
+# parse current psychopy version
+psychopyVersion = Version(__version__)
+
+
+def parseVersionSafely(version, fallback=Version("0")):
+    """
+    Wrapper around packaging.version.parse which avoids raising an InvalidVersionError, making it
+    safer to use on potentially inconsistent version strings.
+
+    Checks for valid version string before parsing, then tries:
+    - With all but numbers, dots and keywords removed
+    - With all but numbers and dots removed
+    Finally, if the version number is still invalid, will return whatever is supplied as
+    `fallback` rather than raising an error.
+
+    Parameters
+    ----------
+    version : str
+        Version string to parse
+    fallback : Version
+        Value to return if version fails to parse
+
+    Returns
+    -------
+    Version
+        Parsed version string
+    """
+    # if version is already parsed, return unchanged
+    if isinstance(version, Version):
+        return Version
+    # if not a string, make into a string
+    if not isinstance(version, str):
+        version = str(version)
+    # if version is already valid, do normal parsing
+    if re.fullmatch(version, VERSION_PATTERN):
+        return Version(version)
+    # try stripping all but numbers, dots and keywords
+    version = "".join(
+        re.findall(r"\d|\.|a|b|c|rc|alpha|beta|pre|preview|post|rev|r|dev", version)
+    )
+    if re.fullmatch(version, VERSION_PATTERN):
+        return Version(version)
+    # try stripping all but numbers and dots
+    version = "".join(
+        re.findall(r"\d|\.", version)
+    )
+    if re.fullmatch(version, VERSION_PATTERN):
+        return Version(version)
+    # finally, try just in case and return fallback on fail
+    try:
+        return Version(version)
+    except InvalidVersion:
+        return fallback
+
+
+class VersionRange:
+    def __init__(self, first=None, last=None):
+        self.first = first
+        self.last = last
+
+    @property
+    def first(self):
+        return self._first
+
+    @first.setter
+    def first(self, value):
+        self._first = value
+        if self._first is not None:
+            self._first = Version(self._first)
+
+    @property
+    def last(self):
+        return self._last
+
+    @last.setter
+    def last(self, value):
+        self._last = value
+        if self._last is not None:
+            self._last = Version(self._last)
+
+    def __contains__(self, item):
+        # enforce Version type
+        if isinstance(item, str):
+            item = Version(item)
+        # if not less than or greater than, assume contains
+        lt = self > item
+        gt = self < item
+        return not any((lt, gt))
+
+    def __eq__(self, other):
+        return other in self
+
+    def __lt__(self, other):
+        # if no first version, nothing is less than
+        if self.last is None:
+            return False
+        # enforce Version type
+        if isinstance(other, str):
+            other = Version(other)
+        # otherwise compare to first version
+        return self.last < other
+
+    def __le__(self, other):
+        return self < other or other == self
+
+    def __gt__(self, other):
+        # if no last version, nothing is greater than
+        if self.first is None:
+            return False
+        # enforce Version type
+        if isinstance(other, str):
+            other = Version(other)
+        # otherwise compare to first version
+        return self.first > other
+
+    def __ge__(self, other):
+        return self > other or other in self
+
+    def __str__(self):
+        first = self.first
+        if first is None:
+            first = "up"
+        last = self.last
+        if last is None:
+            last = "latest"
+
+        return _translate("{} to {}").format(first, last)
+
 
 # ideally want localization for error messages
 # but don't want to have the lib/ depend on app/, drat
@@ -37,6 +177,36 @@ def _translate(string):
     """placeholder (non)function
     """
     return string
+
+
+def getPsychoJSVersionStr(currentVersion, preferredVersion=''):
+    """Get the PsychoJS version string for a given PsychoPy version
+    taking into account:
+    - the current/requested version
+    - the fact that early PsychoJS versions did not include minor version
+    - PsychoJS versions do not use rc1 or dev1 suffixes"""
+    if preferredVersion == '':
+        useVerStr = currentVersion
+    elif preferredVersion == 'latest':
+        useVerStr = latestVersion()
+    else:
+        useVerStr = fullVersion(preferredVersion)
+
+    # do we shorten minor versions ('3.4.2' to '3.4')?
+    # only from 3.2 onwards
+    if (Version('3.2')) <= Version(useVerStr) < Version('2021') \
+            and len(useVerStr.split('.')) > 2:
+        # e.g. 2020.2 not 2021.2.5
+        useVerStr = '.'.join(useVerStr.split('.')[:2])
+    elif len(useVerStr.split('.')) > 3:
+        # e.g. 2021.1.0 not 2021.1.0.dev3
+        useVerStr = '.'.join(useVerStr.split('.')[:3])
+    # PsychoJS doesn't have additional rc1 or dev1 releases
+    for versionSuffix in ["rc", "dev", "post", "a", "b"]:
+        if versionSuffix in useVerStr:
+            useVerStr = useVerStr.split(versionSuffix)[0]
+
+    return useVerStr
 
 
 def useVersion(requestedVersion):
@@ -68,12 +238,17 @@ def useVersion(requestedVersion):
     See also:
         ensureMinimal()
     """
+    requestedVersion = str(requestedVersion)
+
     # Sanity Checks
     imported = _psychopyComponentsImported()
     if imported:
         msg = _translate("Please request a version before importing any "
                          "PsychoPy modules. (Found: {})")
         raise RuntimeError(msg.format(imported))
+
+    # make sure PsychoPy and Python versions match
+    ensurePythonCompatibility(requestedVersion)
 
     # Get a proper full-version tag from a partial tag:
     reqdMajorMinorPatch = fullVersion(requestedVersion)
@@ -86,18 +261,6 @@ def useVersion(requestedVersion):
     if not os.path.isdir(VERSIONSDIR):
         _clone(requestedVersion)  # Allow the versions subdirectory to be built
 
-    if constants.PY3:
-        py3Compatible = _versionFilter(versionOptions(local=False), None)
-        py3Compatible += _versionFilter(availableVersions(local=False), None)
-        py3Compatible.sort(reverse=True)
-
-        if reqdMajorMinorPatch not in py3Compatible:
-            msg = _translate("Please request a version of PsychoPy that is compatible with Python 3. "
-                             "You can choose from the following versions: {}. "
-                             "Alternatively, run a Python 2 installation of PsychoPy < v1.9.0.\n")
-            logging.error(msg.format(py3Compatible))
-            return
-
     if psychopy.__version__ != reqdMajorMinorPatch:
         # Switching required, so make sure `git` is available.
         if not _gitPresent():
@@ -109,6 +272,8 @@ def useVersion(requestedVersion):
 
         # Reload!
         reload(psychopy)
+        reload(preferences)
+        reload(constants)
         reload(logging)
         reload(web)
         if _versionTuple(reqdMajorMinorPatch) >= (1, 80):
@@ -118,6 +283,41 @@ def useVersion(requestedVersion):
 
     logging.exp('Version now set to: {}'.format(psychopy.__version__))
     return psychopy.__version__
+
+
+def ensurePythonCompatibility(requestedVersion):
+    """
+    Ensure that the requested version of PsychoPy is compatible with the currently running version of Python, raising
+    an EnvironmentError if not.
+
+    Parameters
+    ----------
+    requestedVersion : str
+        PsychoPy version being requested (e.g. "2023.2.0")
+    """
+    requestedVersion = Version(requestedVersion)
+
+    # get Python version
+    pyVersion = Version(".".join(
+        [str(sys.version_info.major), str(sys.version_info.minor)]
+    ))
+    # get first and last PsychoPy version to support it
+    firstVersion, lastVersion = versionMap.get(pyVersion, (None, None))
+    # check supported
+    _msg = _translate(
+        "Requested PsychoPy version {requested} does not support installed Python version {py}. The {mode} version "
+        "of PsychoPy to support {py} was version {key}.\n"
+        "\n"
+        "Try either choosing a different version of PsychoPy or installing a different version of Python - some "
+        "standalone PsychoPy releases include installers for multiple versions."
+    ).format(requested=requestedVersion, py=pyVersion, mode="{mode}", key="{key}")
+    if firstVersion is not None and firstVersion > requestedVersion:
+        # if Python version is too new for PsychoPy...
+        raise EnvironmentError(_msg.format(mode="first", key=firstVersion))
+
+    if lastVersion is not None and lastVersion < requestedVersion:
+        # if PsychoPy version is too new for Python...
+        raise EnvironmentError(_msg.format(mode="last", key=lastVersion))
 
 
 def ensureMinimal(requiredVersion):
@@ -161,7 +361,7 @@ def _switchToVersion(requestedVersion):
         else:
             _clone(requestedVersion)
     except (CalledProcessError, OSError) as e:
-        if 'did not match any file(s) known to git' in e.output:
+        if 'did not match any file(s) known to git' in str(e):
             msg = _translate("'{}' is not a valid PsychoPy version.")
             logging.error(msg.format(requestedVersion))
             raise RuntimeError(msg)
@@ -185,9 +385,9 @@ def versionOptions(local=True):
     majorMinor = sorted(
         list({'.'.join(v.split('.')[:2])
               for v in availableVersions(local=local)}),
-        key=parse_version, 
+        key=Version, 
         reverse=True)
-    major = sorted(list({v.split('.')[0] for v in majorMinor}), key=parse_version, reverse=True)
+    major = sorted(list({v.split('.')[0] for v in majorMinor}), key=Version, reverse=True)
     special = ['latest']
     return special + major + majorMinor
 
@@ -202,7 +402,7 @@ def _localVersions(forceCheck=False):
             tagInfo = subprocess.check_output(cmd.split(), cwd=VERSIONSDIR,
                                               env=constants.ENVIRON).decode('UTF-8')
             allTags = tagInfo.splitlines()
-            _localVersionsCache = sorted(allTags, key=parse_version, reverse=True)
+            _localVersionsCache = sorted(allTags, key=Version, reverse=True)
     return _localVersionsCache
 
 
@@ -217,16 +417,11 @@ def _remoteVersions(forceCheck=False):
         except (CalledProcessError, OSError):
             pass
         else:
-            if constants.PY3:
-                allTags = [line.split('refs/tags/')[1]
-                           for line in tagInfo.decode().splitlines()
-                           if '^{}' not in line]
-            else:
-                allTags = [line.split('refs/tags/')[1]
-                           for line in tagInfo.splitlines()
-                           if '^{}' not in line]
+            allTags = [line.split('refs/tags/')[1]
+                       for line in tagInfo.decode().splitlines()
+                       if '^{}' not in line]
             # ensure most recent (i.e., highest) first
-            _remoteVersionsCache = sorted(allTags, key=parse_version, reverse=True)
+            _remoteVersionsCache = sorted(allTags, key=Version, reverse=True)
     return _remoteVersionsCache
 
 
@@ -244,25 +439,23 @@ def _versionFilter(versions, wxVersion):
         All valid selections for the version to be chosen that are compatible with Python version used
     """
 
-    # Get Python 3 Compatibility
-    if constants.PY3:
-        # msg = _translate("Filtering versions of PsychoPy only compatible with Python 3.")
-        # logging.info(msg)
-        versions = [ver for ver in versions
-                    if ver == 'latest'
-                    or parse_version(ver) >= parse_version('1.90')
-                    and len(ver) > 1]
+    # msg = _translate("Filtering versions of PsychoPy only compatible with Python 3.")
+    # logging.info(msg)
+    versions = [ver for ver in versions
+                if ver == 'latest'
+                or Version(ver) >= Version('1.90')
+                and len(ver) > 1]
 
     # Get WX Compatibility
     compatibleWX = '4.0'
-    if wxVersion is not None and parse_version(wxVersion) >= parse_version(compatibleWX):
+    if wxVersion is not None and Version(wxVersion) >= Version(compatibleWX):
         # msg = _translate("wx version: {}. Filtering versions of "
         #                  "PsychoPy only compatible with wx >= version {}".format(wxVersion,
         #                                                                       compatibleWX))
         # logging.info(msg)
         return [ver for ver in versions
                 if ver == 'latest'
-                or parse_version(ver) > parse_version('1.85.04')
+                or Version(ver) > Version('1.85.04')
                 and len(ver) > 1]
     return versions
 
@@ -281,7 +474,7 @@ def availableVersions(local=True, forceCheck=False):
             return sorted(
                 list(set([psychopy.__version__] + _localVersions(forceCheck) + _remoteVersions(
                     forceCheck))),
-                key=parse_version,
+                key=Version,
                 reverse=True)
     except subprocess.CalledProcessError:
         return []
@@ -330,9 +523,16 @@ def _checkout(requestedVersion):
         # Grab new tags
         msg = _translate("Couldn't find version {} locally. Trying github...")
         logging.info(msg.format(requestedVersion))
-        subprocess.check_output('git fetch github --tags'.split(),
-                                cwd=VERSIONSDIR,
-                                env=constants.ENVIRON).decode('UTF-8')
+
+        out, stdout, stderr = _call_process(f"git fetch github --tags")
+
+        # check error code
+        if out.returncode != 0:
+            logging.error(stderr)
+            raise ChildProcessError(
+                'Error: process exited with code {}, check log for '
+                'output.'.format(out.returncode))
+
         # is requested here now? forceCheck to refresh cache
         if requestedVersion not in _localVersions(forceCheck=True):
             msg = _translate("{} is not currently available.")
@@ -340,13 +540,18 @@ def _checkout(requestedVersion):
             return ''
 
     # Checkout the requested tag
-    cmd = ['git', 'checkout', requestedVersion]
-    out = subprocess.check_output(cmd,
-                                  stderr=subprocess.STDOUT,
-                                  cwd=VERSIONSDIR,
-                                  env=constants.ENVIRON).decode('UTF-8')
-    logging.debug(out)
-    logging.exp('Success:  ' + ' '.join(cmd))
+    out, stdout, stderr = _call_process(f"git reset --hard") # in case of any accidental local changes
+    out, stdout, stderr = _call_process(f"git checkout {requestedVersion}") #
+
+    # check error code
+    if out.returncode != 0:
+        logging.error(stderr)
+        raise ChildProcessError(
+            'Error: process exited with code {}, check log for '
+            'output.'.format(out.returncode))
+
+    logging.exp('Success:  ' + ' '.join(f"git checkout {requestedVersion}"))
+
     return requestedVersion
 
 
@@ -379,3 +584,19 @@ def _gitPresent():
 
 def _psychopyComponentsImported():
     return [name for name in globals() if name in psychopy.__all__]
+
+def _call_process(cmd, log=True):
+    """Convenience call to open subprocess, and pipe stdout to debug"""
+    if type(cmd) in [str, bytes]:
+        cmd = cmd.split()
+    out = subprocess.Popen(
+        cmd,
+        stderr=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        cwd=VERSIONSDIR,
+        env=constants.ENVIRON)
+    stdout, stderr = out.communicate()
+    if log:
+        logging.debug(stdout)
+
+    return out, stdout, stderr

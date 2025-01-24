@@ -6,9 +6,9 @@ A tutorial to get you going with your first stimulus display.
 
 Know your monitor
 ------------------------
-PsychoPy has been designed to handle your screen calibrations for you. It is also designed to operate (if possible) in the final experimental units that you like to use e.g. degrees of visual angle.
+|PsychoPy| has been designed to handle your screen calibrations for you. It is also designed to operate (if possible) in the final experimental units that you like to use e.g. degrees of visual angle.
 
-In order to do this PsychoPy needs to know a little about your monitor. There is a GUI to help with this (select MonitorCenter from the tools menu of PsychoPyIDE or run ...site-packages/monitors/MonitorCenter.py).
+In order to do this |PsychoPy| needs to know a little about your monitor. There is a GUI to help with this (select MonitorCenter from the tools menu of |PsychoPy|IDE or run ...site-packages/monitors/MonitorCenter.py).
 
 In the MonitorCenter window you can create a new monitor name, insert values that describe your monitor and run calibrations like gamma corrections. For now you can just stick to the [`testMonitor`] but give it correct values for your screen size in number of pixels and width in cm.
 
@@ -18,12 +18,13 @@ Your first stimulus
 ------------------------
 
 Building stimuli is extremely easy. All you need to do is create a
-:class:`~psychopy.visual.Window`, then some stimuli. Draw those stimuli, then update the window. PsychoPy has various other useful commands to help with timing too. Here's an example. Type it into a coder window, save it somewhere and press run.
+:class:`~psychopy.visual.Window`, then some stimuli. Draw those stimuli, then update the window. |PsychoPy| has various other useful commands to help with timing too. Here's an example. Type it into a coder window, save it somewhere and press run.
 
 .. code-block:: python
     :linenos:
 
     from psychopy import visual, core  # import some libraries from PsychoPy
+    from psychopy.hardware import keyboard
 
     #create a window
     mywin = visual.Window([800,600], monitor="testMonitor", units="deg")
@@ -31,6 +32,9 @@ Building stimuli is extremely easy. All you need to do is create a
     #create some stimuli
     grating = visual.GratingStim(win=mywin, mask="circle", size=3, pos=[-4,0], sf=3)
     fixation = visual.GratingStim(win=mywin, size=0.5, pos=[0,0], sf=0, rgb=-1)
+
+    #create a keyboard component
+    kb = keyboard.Keyboard()
 
     #draw the stimuli and update the window
     grating.draw()
@@ -63,12 +67,12 @@ That ran for 200 frames (and then waited 5 seconds as well). Maybe it would be n
 with the line:
 
 .. literalinclude:: tutorial1.py
-   :lines: 11
+   :lines: 15
 
 Then, within the loop (make sure it has the same indentation as the other lines) add the lines:
 
 .. literalinclude:: tutorial1.py
-   :lines: 17-19
+   :lines: 21-23
 
 the first line counts how many keys have been pressed since the last frame. If more than zero are found then we break out of the never-ending loop. The second line clears the event buffer and should always be called after you've collected the events you want (otherwise it gets full of events that we don't care about like the mouse moving around etc...).
 

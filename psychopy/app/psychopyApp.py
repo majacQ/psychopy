@@ -2,10 +2,8 @@
 # -*- coding: utf-8 -*-
 
 # Part of the PsychoPy library
-# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2021 Open Science Tools Ltd.
+# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2024 Open Science Tools Ltd.
 # Distributed under the terms of the GNU General Public License (GPL).
-
-from __future__ import absolute_import, print_function
 
 import sys
 
@@ -19,14 +17,15 @@ import psychopy.locale_setup  # noqa
 
 
 def start_app():
-    from psychopy.app._psychopyApp import PsychoPyApp
+    from psychopy.app import startApp, quitApp
+    from psychopy.preferences import prefs
 
-    showSplash = True
+    showSplash = prefs.app['showSplash']
     if '--no-splash' in sys.argv:
         showSplash = False
         del sys.argv[sys.argv.index('--no-splash')]
-    app = PsychoPyApp(0, showSplash=showSplash)
-    app.MainLoop()
+    _ = startApp(showSplash=showSplash)  # main loop
+    quitApp()
 
 
 def main():
@@ -74,17 +73,23 @@ Options:
             ('| packaged by conda-forge |' in sys.version or
              '|Anaconda' in sys.version)):
 
-        # On macOS with Anaconda, GUI applications need to be run using
+        # On macOS with Anaconda, GUI applications used to need to be run using
         # `pythonw`. Since we have no way to determine whether this is currently
         # the case, we run this script again -- ensuring we're definitely using
         # pythonw.
         import os
         env = os.environ
         PYTHONW = env.get('PYTHONW', 'False')
+        pyw_exe = sys.executable + 'w'
 
-        if PYTHONW != 'True':
+        # Updated 2024.1.6: as of Python 3, `pythonw` and `python` can be used
+        # interchangeably for wxPython applications on macOS with GUI support.
+        # The defaults and conda-forge channels no longer install python with a
+        # framework build (to do so: `conda install python=3.8 python.app`).
+        # Therefore `pythonw` often doesn't exist, and we can just use `python`.
+        if PYTHONW != 'True' and os.path.isfile(pyw_exe):
             from psychopy import core
-            cmd = [sys.executable + 'w', __file__]
+            cmd = [pyw_exe, __file__]
             if '--no-splash' in sys.argv:
                 cmd.append('--no-splash')
 

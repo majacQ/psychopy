@@ -1,14 +1,7 @@
-#!/usr/bin/env python
-#  -*- coding: utf-8 -*-
-
-# Part of the psychopy.iohub library.
-# Copyright (C) 2012-2016 iSolver Software Solutions
+# -*- coding: utf-8 -*-
+# Part of the PsychoPy library
+# Copyright (C) 2012-2020 iSolver Software Solutions (C) 2021 Open Science Tools Ltd.
 # Distributed under the terms of the GNU General Public License (GPL).
-from __future__ import division, absolute_import
-from __future__ import print_function
-
-from past.builtins import basestring
-from builtins import object
 import gc
 import sys
 
@@ -20,7 +13,7 @@ from psychopy import clock
 REALTIME_PRIORITY_CLASS = -18
 HIGH_PRIORITY_CLASS = -10
 
-class Computer(object):
+class Computer():
     """Computer provides access to OS and Process level functionality:
 
     * Read the current time in sec.msec format. The time base used is shared by
@@ -487,7 +480,7 @@ class Computer(object):
     @staticmethod
     def getProcessFromName(pnames, id_only=False):
         procs = []
-        if isinstance(pnames, basestring):
+        if isinstance(pnames, str):
             pnames = [pnames, ]
         for p in psutil.process_iter():
             if p.name() in pnames:
@@ -529,6 +522,20 @@ class Computer(object):
            None
         """
         return Computer.global_clock.getTime()
+
+    @staticmethod
+    def syncClock(params):
+        """
+        Sync parameters between Computer.global_clock and a given dict.
+
+        Parameters
+        ----------
+        params : dict
+            Dict of attributes and values to apply to the computer's global clock. See
+            `psychopy.clock.MonotonicClock` for what attributes to include.
+        """
+        for key, value in params.items():
+            setattr(Computer.global_clock, key, value)
 
     @staticmethod
     def getPhysicalSystemMemoryInfo():

@@ -45,26 +45,28 @@ BOMS = {
     BOM_UTF16_LE: ('utf16_le', 'utf_16'),
     BOM_UTF16: ('utf_16', 'utf_16'),
     }
+
 # All legal variants of the BOM codecs.
-# TODO: the list of aliases is not meant to be exhaustive, is there a
-#   better way ?
 BOM_LIST = {
     'utf_16': 'utf_16',
-    'u16': 'utf_16',
     'utf16': 'utf_16',
     'utf-16': 'utf_16',
-    'utf16_be': 'utf16_be',
     'utf_16_be': 'utf16_be',
     'utf-16be': 'utf16_be',
-    'utf16_le': 'utf16_le',
     'utf_16_le': 'utf16_le',
     'utf-16le': 'utf16_le',
     'utf_8': 'utf_8',
-    'u8': 'utf_8',
-    'utf': 'utf_8',
     'utf8': 'utf_8',
     'utf-8': 'utf_8',
-    }
+    'u16': 'utf_16',  # Add mapping for 'u16'
+    'u8': 'utf_8',    # Add mapping for 'u8'
+}
+
+# Add regular expressions for matching variations
+for encoding in ['utf-16', 'utf-8']:
+    regex = re.compile(fr'{encoding}(?:_|\-)?(?:be|le)?|u16|u8', re.IGNORECASE)
+    for match in filter(regex.fullmatch, BOM_LIST.keys()):
+        BOM_LIST[match] = BOM_LIST[encoding]
 
 # Map of encodings to the BOM to write.
 BOM_SET = {
@@ -200,7 +202,7 @@ class DuplicateError(ConfigObjError):
 
 class ConfigspecError(ConfigObjError):
     """
-    An error occured whilst parsing a configspec.
+    An error occurred whilst parsing a configspec.
     """
 
 
@@ -236,7 +238,7 @@ class UnreprError(ConfigObjError):
 
 
 
-class InterpolationEngine(object):
+class InterpolationEngine:
     """
     A helper class to help perform string interpolation.
 
@@ -504,7 +506,9 @@ class Section(dict):
 
     def __getitem__(self, key):
         """Fetch the item and do string interpolation."""
+        # Get the value from a dict as normal
         val = dict.__getitem__(self, key)
+
         if self.main.interpolation:
             if isinstance(val, six.string_types):
                 return self._interpolate(key, val)
@@ -806,11 +810,11 @@ class Section(dict):
 
         Return a dictionary of the return values
 
-        If the function raises an exception, raise the errror
+        If the function raises an exception, raise the error
         unless ``raise_errors=False``, in which case set the return value to
         ``False``.
 
-        Any unrecognised keyword arguments you pass to walk, will be pased on
+        Any unrecognised keyword arguments you pass to walk, will be passed on
         to the function you pass in.
 
         Note: if ``call_on_sections`` is ``True`` then - on encountering a
@@ -1144,7 +1148,6 @@ class ConfigObj(Section):
         '1': True, '0': False,
         'true': True, 'false': False,
         }
-
 
     def __init__(self, infile=None, options=None, configspec=None, encoding=None,
                  interpolation=True, raise_errors=False, list_values=True,
@@ -1508,7 +1511,7 @@ class ConfigObj(Section):
         into strings.
         """
         if not isinstance(value, six.string_types):
-            # intentially 'str' because it's just whatever the "normal"
+            # intentionally 'str' because it's just whatever the "normal"
             # string type is for the python version we're dealing with
             return str(value)
         else:
@@ -1705,7 +1708,7 @@ class ConfigObj(Section):
         Handle an error according to the error settings.
 
         Either raise the error or store it.
-        The error will have occured at ``cur_index``
+        The error will have occurred at ``cur_index``
         """
         line = infile[cur_index]
         cur_index += 1
@@ -1762,7 +1765,7 @@ class ConfigObj(Section):
                 for val in value])
         if not isinstance(value, six.string_types):
             if self.stringify:
-                # intentially 'str' because it's just whatever the "normal"
+                # intentionally 'str' because it's just whatever the "normal"
                 # string type is for the python version we're dealing with
                 value = str(value)
             else:
@@ -2341,7 +2344,7 @@ class ConfigObj(Section):
 
 
 
-class SimpleVal(object):
+class SimpleVal:
     """
     A simple validator.
     Can be used to check that all members expected are present.

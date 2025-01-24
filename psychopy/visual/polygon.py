@@ -5,12 +5,9 @@
 :class:`~psychopy.visual.ShapeStim`"""
 
 # Part of the PsychoPy library
-# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2021 Open Science Tools Ltd.
+# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2024 Open Science Tools Ltd.
 # Distributed under the terms of the GNU General Public License (GPL).
 
-from __future__ import absolute_import, print_function
-
-from builtins import range
 import psychopy  # so we can get the __path__
 from psychopy.visual.shape import BaseShapeStim
 from psychopy.tools.attributetools import attributeSetter, setAttribute
@@ -19,7 +16,9 @@ import numpy as np
 
 
 class Polygon(BaseShapeStim):
-    """Creates a regular polygon (triangles, pentagons, ...).
+    """Creates a regular polygon (triangles, pentagons, ...). This is
+    a lazy-imported class, therefore import using full path 
+    `from psychopy.visual.polygon import Polygon` when inheriting from it.
 
     This class is a special case of a :class:`~psychopy.visual.ShapeStim` that
     accepts the same parameters except `closeShape` and `vertices`.
@@ -103,32 +102,42 @@ class Polygon(BaseShapeStim):
     colorSpace : str
         Sets the colorspace, changing how values passed to `lineColor` and
         `fillColor` are interpreted.
+    draggable : bool
+        Can this stimulus be dragged by a mouse click?
 
     """
+
+    _defaultFillColor = "white"
+    _defaultLineColor = "white"
+
     def __init__(self,
                  win,
                  edges=3,
                  radius=.5,
                  units='',
                  lineWidth=1.5,
-                 lineColor=None,
-                 lineColorSpace=None,
-                 fillColor=None,
-                 fillColorSpace=None,
+                 lineColor=False,
+                 fillColor=False,
                  pos=(0, 0),
                  size=1.0,
+                 anchor=None,
                  ori=0.0,
                  opacity=None,
                  contrast=1.0,
                  depth=0,
                  interpolate=True,
-                 lineRGB=False,
-                 fillRGB=False,
+                 draggable=False,
                  name=None,
                  autoLog=None,
                  autoDraw=False,
-                 color=None,
-                 colorSpace='rgb'):
+                 colorSpace='rgb',
+                 # legacy
+                 color=False,
+                 fillColorSpace=None,
+                 lineColorSpace=None,
+                 lineRGB=False,
+                 fillRGB=False,
+                 ):
 
         # what local vars are defined (these are the init params) for use by
         # __repr__
@@ -137,6 +146,7 @@ class Polygon(BaseShapeStim):
 
         self.autoLog = False  # but will be changed if needed at end of init
         self.__dict__['edges'] = edges
+        self.__dict__['lineWidth'] = lineWidth
         self.radius = np.asarray(radius)
         self._calcVertices()
 
@@ -152,11 +162,13 @@ class Polygon(BaseShapeStim):
             closeShape=True,
             pos=pos,
             size=size,
+            anchor=anchor,
             ori=ori,
             opacity=opacity,
             contrast=contrast,
             depth=depth,
             interpolate=interpolate,
+            draggable=draggable,
             lineRGB=lineRGB,
             fillRGB=fillRGB,
             name=name,
@@ -166,10 +178,12 @@ class Polygon(BaseShapeStim):
             colorSpace=colorSpace)
 
     def _calcVertices(self):
-        d = np.pi * 2 / self.edges
-        self.vertices = np.asarray(
-            [np.asarray((np.sin(e * d), np.cos(e * d))) * self.radius
-             for e in range(int(round(self.edges)))])
+        if self.edges == "circle":
+            # If circle is requested, calculate min edges needed for it to appear smooth
+            edges = self._calculateMinEdges(self.__dict__['lineWidth'], threshold=1)
+        else:
+            edges = self.edges
+        self.vertices = self._calcEquilateralVertices(edges, self.radius)
 
     @attributeSetter
     def edges(self, edges):
@@ -206,3 +220,10 @@ class Polygon(BaseShapeStim):
         but use this method if you need to suppress the log message
         """
         setAttribute(self, 'radius', radius, log, operation)
+
+    def setNVertices(self, nVerts, operation='', log=None):
+        """
+        Usually you can use 'stim.attribute = value' syntax instead,
+        but use this method if you need to suppress the log message
+        """
+        setAttribute(self, 'vertices', nVerts, log, operation)

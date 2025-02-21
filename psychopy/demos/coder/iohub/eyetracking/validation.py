@@ -5,10 +5,10 @@ Calibrate, validate, run with GC cursor demo / test.
 Select which tracker to use by setting the TRACKER variable below.
 """
 
-from __future__ import absolute_import, division, print_function
 from psychopy import core, visual
 from psychopy import iohub
 from psychopy.iohub.client.eyetracker.validation import TargetStim
+from psychopy.iohub.util import hideWindow, showWindow
 
 # Eye tracker to use ('mouse', 'eyelink', 'gazepoint', or 'tobii')
 TRACKER = 'mouse'
@@ -133,15 +133,13 @@ io = iohub.launchHubServer(window=win, **devices_config)
 keyboard = io.getDevice('keyboard')
 tracker = io.getDevice('tracker')
 
-win.winHandle.minimize()  # minimize the PsychoPy window
-win.winHandle.set_fullscreen(False)
-
-# run eyetracker calibration
+# Minimize the PsychoPy window if needed
+hideWindow(win)
+# Display calibration gfx window and run calibration.
 result = tracker.runSetupProcedure()
 print("Calibration returned: ", result)
-
-win.winHandle.set_fullscreen(True)
-win.winHandle.maximize()  # maximize the PsychoPy window
+# Maximize the PsychoPy window if needed
+showWindow(win)
 
 # Validation
 
@@ -250,6 +248,4 @@ while t < TRIAL_COUNT:
 # All Trials are done
 # End experiment
 tracker.setConnectionState(False)
-
-io.quit()
 core.quit()

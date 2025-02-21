@@ -2,29 +2,17 @@
 # -*- coding: utf-8 -*-
 
 # Part of the PsychoPy library
-# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2021 Open Science Tools Ltd.
+# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2024 Open Science Tools Ltd.
 # Distributed under the terms of the GNU General Public License (GPL).
 
-from __future__ import absolute_import, print_function
-
-from os import path
 from pathlib import Path
 from psychopy.experiment.components import Param, getInitVals, _translate, BaseVisualComponent
-from psychopy.visual import form
-from psychopy.localization import _localized as __localized
-_localized = __localized.copy()
+from psychopy.tools.stimulustools import formStyles
 
 __author__ = 'Jon Peirce, David Bridges, Anthony Haffey'
 
-# only use _localized values for label values, nothing functional:
-_localized.update({'Items': _translate('Items'),
-                   'Text Height': _translate('Text Height'),
-                   'Style': _translate('Styles'),
-                   'Item Padding': _translate('Item Padding'),
-                   'Data Format': _translate('Data Format'),
-                   'Randomize': _translate('Randomize')
-                   })
-knownStyles = list(form.Form.knownStyles)
+
+knownStyles = list(formStyles)
 
 
 class FormComponent(BaseVisualComponent):
@@ -32,14 +20,16 @@ class FormComponent(BaseVisualComponent):
 
     categories = ['Responses']
     targets = ['PsychoPy', 'PsychoJS']
+    version = "2020.2.0"
     iconFile = Path(__file__).parent / 'form.png'
     tooltip = _translate('Form: a Psychopy survey tool')
+    beta = False
 
     def __init__(self, exp, parentName,
                  name='form',
-                 items='.csv',
-                 textHeight=.03,
-                 font="Open Sans",
+                 items='',
+                 textHeight=0.03,
+                 font="Noto Sans",
                  randomize=False,
                  fillColor='',
                  borderColor='',
@@ -86,38 +76,42 @@ class FormComponent(BaseVisualComponent):
             items, valType='file', inputType="table", allowedTypes=[], categ='Basic',
             updates='constant',
             hint=_translate("The csv filename containing the items for your survey."),
-            label=_localized['Items'])
+            label=_translate("Items"),
+            ctrlParams={
+                'template': Path(__file__).parent / "formItems.xltx"
+            }
+        )
 
         self.params['Text Height'] = Param(
             textHeight, valType='num', inputType="single", allowedTypes=[], categ='Formatting',
             updates='constant',
             hint=_translate("The size of the item text for Form"),
-            label=_localized['Text Height'])
+            label=_translate("Text height"))
 
         self.params['Font'] = Param(
             font, valType='str', inputType="single", allowedTypes=[], categ='Formatting',
             updates='constant', allowedUpdates=["constant"],
             hint=_translate("The font name (e.g. Comic Sans)"),
-            label=_translate('Font'))
+            label=_translate("Font"))
 
         self.params['Randomize'] = Param(
             randomize, valType='bool', inputType="bool", allowedTypes=[], categ='Basic',
             updates='constant',
             hint=_translate("Do you want to randomize the order of your questions?"),
-            label=_localized['Randomize'])
+            label=_translate("Randomize"))
 
         self.params['Item Padding'] = Param(
             itemPadding, valType='num', inputType="single", allowedTypes=[], categ='Layout',
             updates='constant',
             hint=_translate("The padding or space between items."),
-            label=_localized['Item Padding'])
+            label=_translate("Item padding"))
 
         self.params['Data Format'] = Param(
             'rows', valType='str', inputType="choice", allowedTypes=[], categ='Basic',
             allowedVals=['columns', 'rows'],
             updates='constant',
             hint=_translate("Store item data by columns, or rows"),
-            label=_localized['Data Format'])
+            label=_translate("Data format"))
 
         # Appearance
         for param in ['fillColor', 'borderColor', 'itemColor', 'responseColor', 'markerColor', 'Style']:
@@ -133,7 +127,7 @@ class FormComponent(BaseVisualComponent):
             updates='constant', allowedVals=knownStyles + ["custom..."],
             hint=_translate(
                     "Styles determine the appearance of the form"),
-            label=_localized['Style'])
+            label=_translate("Styles"))
 
         for param in ['fillColor', 'borderColor', 'itemColor', 'responseColor', 'markerColor']:
             self.depends += [{
@@ -153,27 +147,28 @@ class FormComponent(BaseVisualComponent):
             updates='constant',
             allowedUpdates=['constant', 'set every repeat', 'set every frame'],
             hint=_translate("Base text color for questions"),
-            label=_translate("Item Color"))
+            label=_translate("Item color"))
 
         self.params['responseColor'] = Param(responseColor,
             valType='color', inputType="color", categ='Appearance',
             updates='constant',
             allowedUpdates=['constant', 'set every repeat', 'set every frame'],
             hint=_translate("Base text color for responses, also sets color of lines in sliders and borders of textboxes"),
-            label=_translate("Response Color"))
+            label=_translate("Response color"))
 
         self.params['markerColor'] = Param(markerColor,
             valType='color', inputType="color", categ='Appearance',
             updates='constant',
             allowedUpdates=['constant', 'set every repeat', 'set every frame'],
             hint=_translate("Color of markers and the scrollbar"),
-            label=_translate("Marker Color"))
+            label=_translate("Marker color"))
 
         self.params['pos'].allowedUpdates = []
         self.params['size'].allowedUpdates = []
 
     def writeInitCode(self, buff):
         inits = getInitVals(self.params)
+        inits['depth'] = -self.getPosInRoutine()
         # build up an initialization string for Form():
         code = (
             "win.allowStencil = True\n"
@@ -191,7 +186,8 @@ class FormComponent(BaseVisualComponent):
             "responseColor=%(responseColor)s, markerColor=%(markerColor)s, colorSpace=%(colorSpace)s, \n"
             "size=%(size)s,\n"
             "pos=%(pos)s,\n"
-            "itemPadding=%(Item Padding)s"
+            "itemPadding=%(Item Padding)s,\n"
+            "depth=%(depth)s\n"
         )
         buff.writeIndentedLines(code % inits)
         buff.setIndentLevel(-1, relative=True)
@@ -202,6 +198,7 @@ class FormComponent(BaseVisualComponent):
 
     def writeInitCodeJS(self, buff):
         inits = getInitVals(self.params)
+        inits['depth'] = -self.getPosInRoutine()
         # build up an initialization string for Form():
         initStr = ("{name} = new visual.Form({{\n"
                    "  win : psychoJS.window, name:'{name}',\n"
@@ -212,7 +209,8 @@ class FormComponent(BaseVisualComponent):
                    "  size : {size},\n"
                    "  pos : {pos},\n"
                    "  style : {Style},\n"
-                   "  itemPadding : {Item Padding}\n"
+                   "  itemPadding : {Item Padding},\n"
+                   "  depth : {depth}\n"
                    "}});\n".format(**inits))
         buff.writeIndentedLines(initStr)
 

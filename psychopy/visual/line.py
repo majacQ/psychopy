@@ -6,10 +6,11 @@
 """
 
 # Part of the PsychoPy library
-# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2021 Open Science Tools Ltd.
+# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2024 Open Science Tools Ltd.
 # Distributed under the terms of the GNU General Public License (GPL).
 
-from __future__ import absolute_import, division, print_function
+
+
 
 import psychopy  # so we can get the __path__
 from psychopy import logging
@@ -20,7 +21,10 @@ from psychopy.tools.attributetools import attributeSetter, setAttribute
 
 
 class Line(ShapeStim):
-    """Creates a Line between two points.
+    """Creates a Line between two points. This is
+    a lazy-imported class, therefore import using full path 
+    `from psychopy.visual.line import Line` when
+    inheriting from it.
 
     `Line` accepts all input parameters, that :class:`~psychopy.visual.ShapeStim`
     accepts, except for `vertices`, `closeShape` and `fillColor`.
@@ -86,6 +90,8 @@ class Line(ShapeStim):
     interpolate : bool
         Enable smoothing (anti-aliasing) when drawing lines. This produces a
         smoother (less-pixelated) line.
+    draggable : bool
+        Can this stimulus be dragged by a mouse click?
     lineRGB: array_like, :class:`~psychopy.colors.Color` or None
         *Deprecated*. Please use `color` instead. This argument may be removed
         in a future version.
@@ -116,29 +122,37 @@ class Line(ShapeStim):
         Coordinates `(x, y)` for the start- and end-point of the line.
 
     """
+
+    _defaultFillColor = None
+    _defaultLineColor = "white"
+
     def __init__(self,
                  win,
                  start=(-.5, -.5),
                  end=(.5, .5),
-                 units='',
+                 units=None,
                  lineWidth=1.5,
-                 lineColor=None,
-                 fillColor=None, # Not used, but is supplied by Builder via Polygon
-                 lineColorSpace=None,
+                 lineColor=False,
+                 colorSpace='rgb',
                  pos=(0, 0),
                  size=1.0,
+                 anchor="center",
                  ori=0.0,
                  opacity=None,
                  contrast=1.0,
                  depth=0,
                  interpolate=True,
-                 lineRGB=False,
-                 fillRGB=False,
+                 draggable=False,
                  name=None,
                  autoLog=None,
                  autoDraw=False,
-                 color=None,
-                 colorSpace='rgb'):
+                 # legacy
+                 color=False,
+                 fillColor=False,
+                 lineColorSpace=None,
+                 lineRGB=False,
+                 fillRGB=False,
+                 ):
 
         """
 
@@ -150,7 +164,6 @@ class Line(ShapeStim):
 
         self.__dict__['start'] = numpy.array(start)
         self.__dict__['end'] = numpy.array(end)
-        self.__dict__['vertices'] = [start, end]
 
         super(Line, self).__init__(
             win,
@@ -160,7 +173,8 @@ class Line(ShapeStim):
             lineColorSpace=None,
             fillColor=None,
             fillColorSpace=lineColorSpace,  # have these set to the same
-            vertices=self.vertices,
+            vertices=(start, end),
+            anchor=anchor,
             closeShape=False,
             pos=pos,
             size=size,
@@ -169,6 +183,7 @@ class Line(ShapeStim):
             contrast=contrast,
             depth=depth,
             interpolate=interpolate,
+            draggable=draggable,
             lineRGB=lineRGB,
             fillRGB=fillRGB,
             name=name,
@@ -176,6 +191,8 @@ class Line(ShapeStim):
             autoDraw=autoDraw,
             color=color,
             colorSpace=colorSpace)
+
+        del self._tesselVertices
 
     @property
     def color(self):

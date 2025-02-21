@@ -50,8 +50,12 @@ class Display(Device):
             self._xwindow = None
 
         if Display._computer_display_runtime_info_list is None:
-            Display._computer_display_runtime_info_list =\
-                Display._createAllRuntimeInfoDicts()
+            Display._computer_display_runtime_info_list = Display._createAllRuntimeInfoDicts()
+
+        if self.getIndex() >= self.getDisplayCount():
+            # Requested Display index is invalid. Use Display / Screen index 0.
+            print2err("WARNING: Requested display index does not exist. Using display index 0.")
+            self.device_number = 0
 
         self._addRuntimeInfoToDisplayConfig()
 
@@ -95,6 +99,15 @@ class Display(Device):
 
         """
         return len(cls._computer_display_runtime_info_list)
+
+    @classmethod
+    def getAllDisplayBounds(cls):
+        """
+        Returns pixel display bounds (l,t r,b) for each detected display.
+        
+        :return: list of (l,t r,b) tuples
+        """
+        return [d.get('bounds') for d in cls._computer_display_runtime_info_list]
 
     def getRuntimeInfo(self, display_index = None):
         """
@@ -170,7 +183,7 @@ class Display(Device):
 
         The physical characteristics of the Display and the Participants viewing distance
         will either be based on the ioHub settings specified, or based on the information
-        saved in the PsychoPy Monitor Configuartion file that can be optionally
+        saved in the PsychoPy Monitor Configuration file that can be optionally
         given to the Display Device before it is instantiated.
 
         Args:
@@ -215,7 +228,7 @@ class Display(Device):
 
     def getBounds(self):
         """Get the Display's pixel bounds; representing the left,top,right,and
-        bottom edge of the the display screen in native pixel units.
+        bottom edge of the display screen in native pixel units.
 
         .. note:: (left, top, right, bottom) bounds will 'not' always be (0, 0, pixel_width, pixel_height). If a multiple display setup is being used, (left, top, right, bottom) indicates the actual absolute pixel bounds assigned to that monitor by the OS. It can be assumed that right = left + display_pixel_width and bottom =  top + display_pixel_height
 
@@ -263,7 +276,7 @@ class Display(Device):
     def getPhysicalDimensions(self):
         """Returns the Display's physical screen area ( width,  height ) as
         specified in the ioHub Display devices configuration settings or by a
-        PsychoPy Monitor Configuartion file.
+        PsychoPy Monitor Configuration file.
 
         Args:
             None
@@ -552,7 +565,7 @@ class Display(Device):
             phys_width,
             phys_height):
         '''
-        For the the screen index the  full screen psychopy window is created
+        For the screen index the  full screen psychopy window is created
         over, this function maps from psychopy coord space (pix, norm, deg,
         all with center = 0,0) to system pix position.
 
@@ -562,10 +575,13 @@ class Display(Device):
         coord_type = self.getCoordinateType()
         if coord_type in Display._coord_type_mappings:
             coord_type = Display._coord_type_mappings[coord_type]
-        else:
-            print2err(
-                ' *** Display device error: Unknown coordinate type: {0}'.format(coord_type))
+        elif coord_type is None:
+            print2err(' *** iohub warning: Display / Monitor unit type has not been set.')
             return
+        else:
+            print2err(' *** iohub error: Unknown Display / Monitor coordinate type: {0}'.format(coord_type))
+            return
+
         self._pix2coord = None
 
         # For now, use psychopy unit conversions so that drawing positions match
@@ -580,7 +596,7 @@ class Display(Device):
             return (x - w / 2), -y + h / 2
 
         def psychopy2displayPix(cx, cy):
-            return l + (cx + w / 2), t + (cy + h / 2)
+            return l + (cx + w / 2), b - (cy + h / 2)
 
         if coord_type == 'pix':
             def pix2coord(self, x, y, display_index=None):

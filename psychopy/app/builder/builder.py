@@ -4,34 +4,41 @@
 """
 Defines the behavior of Psychopy's Builder view window
 Part of the PsychoPy library
-Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2021 Open Science Tools Ltd.
+Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2024 Open Science Tools Ltd.
 Distributed under the terms of the GNU General Public License (GPL).
 """
-
-from __future__ import absolute_import, division, print_function
-
+import collections
 import os, sys
-import re
 import subprocess
 import webbrowser
-from math import floor
+from collections import OrderedDict
 from pathlib import Path
 import glob
 import copy
 import traceback
 import codecs
-import numpy
+from types import SimpleNamespace
 
-from pkg_resources import parse_version
+import numpy
+import requests
+import io
+
+from packaging.version import Version
 import wx.stc
 from wx.lib import scrolledpanel
 from wx.lib import platebtn
 from wx.html import HtmlWindow
 
+import psychopy.app.plugin_manager.dialog
 from .validators import WarningManager
-from ...experiment.components import getAllCategories
+from ..pavlovia_ui import sync, PavloviaMiniBrowser
+from ..pavlovia_ui.project import ProjectFrame
+from ..pavlovia_ui.search import SearchFrame
+from ..pavlovia_ui.user import UserFrame
+from ..pavlovia_ui.functions import logInPavlovia
+from ...experiment import getAllElements, getAllCategories
 from ...experiment.routines import Routine, BaseStandaloneRoutine
-from ...tools.stringtools import prettyname
+from psychopy.tools.versionchooser import parseVersionSafely, psychopyVersion
 
 try:
     import markdown_it as md
@@ -43,59 +50,62 @@ try:
 except ImportError:
     from wx import PseudoDC
 
-if parse_version(wx.__version__) < parse_version('4.0.3'):
+if Version(wx.__version__) < Version('4.0.3'):
     wx.NewIdRef = wx.NewId
-
-try:
-    from queue import Queue, Empty
-except ImportError:
-    from Queue import Queue, Empty  # python 2.x
 
 from psychopy.localization import _translate
 from ... import experiment, prefs
-from .. import dialogs, icons
-from ..themes import IconCache, ThemeMixin
-from ..themes._themes import PsychopyDockArt, PsychopyTabArt, ThemeSwitcher
-from psychopy import logging, constants, data
+from .. import dialogs, utils, ribbon
+from ..themes import icons, colors, handlers
+from ..themes.ui import ThemeSwitcher
+from ..ui import BaseAuiFrame
+from psychopy import logging, data
 from psychopy.tools.filetools import mergeFolder
 from .dialogs import (DlgComponentProperties, DlgExperimentProperties,
-                      DlgCodeComponentProperties, DlgLoopProperties, ParamCtrls, ParamNotebook)
-from ..utils import (PsychopyToolbar, PsychopyPlateBtn, WindowFrozen,
-                     FileDropTarget, FrameSwitcher, updateDemosMenu)
+                      DlgCodeComponentProperties, DlgLoopProperties,
+                      ParamNotebook, DlgNewRoutine, BuilderFindDlg)
+from ..utils import (BasePsychopyToolbar, HoverButton, ThemedPanel, WindowFrozen,
+                     FileDropTarget, FrameSwitcher, updateDemosMenu,
+                     ToggleButtonArray, HoverMixin)
 
-from psychopy.experiment import components, getAllStandaloneRoutines
-from builtins import str
+from psychopy.experiment import getAllStandaloneRoutines
 from psychopy.app import pavlovia_ui
 from psychopy.projects import pavlovia
-
+from psychopy.tools import stringtools as st
 from psychopy.scripts.psyexpCompile import generateScript
 
-# _localized separates internal (functional) from displayed strings
-# long form here allows poedit string discovery
-_localized = {
-    'Field': _translate('Field'),
-    'Default': _translate('Default'),
-    'Favorites': _translate('Favorites'),
-    'Stimuli': _translate('Stimuli'),
-    'Responses': _translate('Responses'),
-    'Custom': _translate('Custom'),
-    'I/O': _translate('I/O'),
-    'Add to favorites': _translate('Add to favorites'),
-    'Remove from favorites': _translate('Remove from favorites'),
-    # contextMenuLabels
-    'edit': _translate('edit'),
-    'remove': _translate('remove'),
-    'copy': _translate('copy'),
-    'move to top': _translate('move to top'),
-    'move up': _translate('move up'),
-    'move down': _translate('move down'),
-    'move to bottom': _translate('move to bottom')
-}
+# Components which are always hidden
+alwaysHidden = [
+    'BaseComponent', 'BaseStandaloneRoutine', 'BaseValidatorRoutine'
+]
 
-cs = ThemeMixin.appColors
 
-class BuilderFrame(wx.Frame, ThemeMixin):
+class TemplateManager(dict):
+    mainFolder = Path(prefs.paths['resources']).absolute() / 'routine_templates'
+    userFolder = Path(prefs.paths['userPrefsDir']).absolute() / 'routine_templates'
+    experimentFiles = {}
+
+    def __init__(self):
+        dict.__init__(self)
+        self.updateTemplates()
+
+    def updateTemplates(self, ):
+        """Search and import templates in the standard files"""
+        for folder in [TemplateManager.mainFolder, TemplateManager.userFolder]:
+            categs = folder.glob("*.psyexp")
+            for filePath in categs:
+                thisExp = experiment.Experiment()
+                thisExp.loadFromXML(filePath)
+                categName = filePath.stem
+                self[categName]={}
+                for routineName in thisExp.routines:
+                    self[categName][routineName] = copy.copy(thisExp.routines[routineName])
+
+
+class BuilderFrame(BaseAuiFrame, handlers.ThemeMixin):
     """Defines construction of the Psychopy Builder Frame"""
+
+    routineTemplates = TemplateManager()
 
     def __init__(self, parent, id=-1, title='PsychoPy (Experiment Builder)',
                  pos=wx.DefaultPosition, fileName=None, frameData=None,
@@ -113,14 +123,16 @@ class BuilderFrame(wx.Frame, ThemeMixin):
         self.appPrefs = self.app.prefs.app
         self.paths = self.app.prefs.paths
         self.frameType = 'builder'
-        self._filename = fileName
+        self.fileExists = False
+        self.filename = fileName
         self.htmlPath = None
-        self.project = None  # type: pavlovia.PavloviaProject
-        self.btnHandles = {}  # stores toolbar buttons so they can be altered
         self.scriptProcess = None
         self.stdoutBuffer = None
         self.readmeFrame = None
         self.generateScript = generateScript
+
+        # default window title
+        self.winTitle = 'PsychoPy Builder (v{})'.format(self.app.version)
 
         if fileName in self.appData['frames']:
             self.frameData = self.appData['frames'][fileName]
@@ -143,14 +155,13 @@ class BuilderFrame(wx.Frame, ThemeMixin):
             self.frameData['winX'], self.frameData['winY'] = (0, 0)
         if self.frameData['winY'] < 20:
             self.frameData['winY'] = 20
-        wx.Frame.__init__(self, parent=parent, id=id, title=title,
-                          pos=(int(self.frameData['winX']), int(
-                              self.frameData['winY'])),
-                          size=(int(self.frameData['winW']), int(
-                              self.frameData['winH'])),
-                          style=style)
-        self.Bind(wx.EVT_CLOSE, self.closeFrame)
-        #self.panel = wx.Panel(self)
+
+        BaseAuiFrame.__init__(self, parent=parent, id=id, title=title,
+                              pos=(int(self.frameData['winX']),
+                                   int(self.frameData['winY'])),
+                              size=(int(self.frameData['winW']),
+                                    int(self.frameData['winH'])),
+                              style=style)
 
         # detect retina displays (then don't use double-buffering)
         self.isRetina = \
@@ -165,11 +176,12 @@ class BuilderFrame(wx.Frame, ThemeMixin):
 
         # create our panels
         self.flowPanel = FlowPanel(frame=self)
+        self.flowCanvas = self.flowPanel.canvas
         self.routinePanel = RoutinesNotebook(self)
         self.componentButtons = ComponentsPanel(self)
+        self.ribbon = BuilderRibbon(self)
         # menus and toolbars
-        self.toolbar = PsychopyToolbar(frame=self)
-        self.SetToolBar(self.toolbar)
+        self.menuIDs = SimpleNamespace()
         self.makeMenus()
         self.CreateStatusBar()
         self.SetStatusText("")
@@ -179,7 +191,7 @@ class BuilderFrame(wx.Frame, ThemeMixin):
         self.SetAcceleratorTable(accelTable)
 
         # setup a default exp
-        if fileName is not None and os.path.isfile(fileName):
+        if self.filename.is_file():
             self.fileOpen(filename=fileName, closeCurrent=False)
         else:
             self.lastSavedCopy = None
@@ -189,13 +201,18 @@ class BuilderFrame(wx.Frame, ThemeMixin):
         self.updateReadme()  # check/create frame as needed
 
         # control the panes using aui manager
-        self._mgr = aui.AuiManager(
-            self,
-            aui.AUI_MGR_DEFAULT | aui.AUI_MGR_RECTANGLE_HINT)
+        self._mgr = self.getAuiManager()
 
         #self._mgr.SetArtProvider(PsychopyDockArt())
         #self._art = self._mgr.GetArtProvider()
         # Create panels
+        self._mgr.AddPane(self.ribbon,
+                          aui.AuiPaneInfo().
+                          Name("Ribbon").
+                          DockFixed(True).
+                          CloseButton(False).MaximizeButton(True).PaneBorder(False).CaptionVisible(False).
+                          Top()
+                          )
         self._mgr.AddPane(self.routinePanel,
                           aui.AuiPaneInfo().
                           Name("Routines").Caption("Routines").CaptionVisible(True).
@@ -230,23 +247,25 @@ class BuilderFrame(wx.Frame, ThemeMixin):
         self.SetSize(
             (int(self.frameData['winW']), int(self.frameData['winH'])))
         self.SendSizeEvent()
+        self._mgr.GetPane("Ribbon").Show()
         self._mgr.Update()
 
         # self.SetAutoLayout(True)
         self.Bind(wx.EVT_CLOSE, self.closeFrame)
         self.Bind(wx.EVT_SIZE, self.onResize)
+        self.Bind(wx.EVT_SHOW, self.onShow)
 
         self.app.trackFrame(self)
         self.SetDropTarget(FileDropTarget(targetFrame=self))
-        self._applyAppTheme()
 
-    # def _applyAppTheme(self, target=None):
-    #     # self.SetArtProvider(PsychopyDockArt())
-    #     for c in self.GetChildren():
-    #         if hasattr(c, '_applyAppTheme'):
-    #             c._applyAppTheme()
-    #     self.Refresh()
-    #     self.Update()
+        self.theme = colors.theme
+
+    @property
+    def session(self):
+        """
+        Current Pavlovia session
+        """
+        return pavlovia.getCurrentSession()
 
     # Synonymise Aui manager for use with theme mixin
     def GetAuiManager(self):
@@ -292,16 +311,27 @@ class BuilderFrame(wx.Frame, ThemeMixin):
             wx.ID_SAVEAS,
             _translate("Save &as...\t%s") % keys['saveAs'],
             _translate("Save current experiment file as..."))
-        exportMenu = menu.Append(
-            -1,
+        # export html
+        self.menuIDs.ID_EXPORT_HTML = wx.NewIdRef(count=1)
+        menu.Append(
+            self.menuIDs.ID_EXPORT_HTML,
             _translate("Export HTML...\t%s") % keys['exportHTML'],
-            _translate("Export experiment to html/javascript file"))
+            _translate("Export experiment to html/javascript file")
+        )
+        self.Bind(wx.EVT_MENU, self.fileExport, id=self.menuIDs.ID_EXPORT_HTML)
+        # reveal folder
+        self.menuIDs.ID_REVEAL = wx.NewIdRef(count=1)
+        menu.Append(
+            self.menuIDs.ID_REVEAL,
+            _translate("Reveal in file explorer...\t%s") % keys['revealFolder'],
+            _translate("Open the folder containing this experiment in your system's file explorer")
+        )
+        self.Bind(wx.EVT_MENU, self.fileReveal, id=self.menuIDs.ID_REVEAL)
         menu.Append(
             wx.ID_CLOSE,
             _translate("&Close file\t%s") % keys['close'],
             _translate("Close current experiment"))
         self.Bind(wx.EVT_MENU, self.app.newBuilderFrame, id=wx.ID_NEW)
-        self.Bind(wx.EVT_MENU, self.fileExport, id=exportMenu.GetId())
         self.Bind(wx.EVT_MENU, self.fileSave, id=wx.ID_SAVE)
         menu.Enable(wx.ID_SAVE, False)
         self.Bind(wx.EVT_MENU, self.fileSaveAs, id=wx.ID_SAVEAS)
@@ -316,12 +346,8 @@ class BuilderFrame(wx.Frame, ThemeMixin):
             wx.ID_ANY, _translate("Reset preferences...")
         )
         self.Bind(wx.EVT_MENU, self.resetPrefs, item)
-        # item = menu.Append(wx.NewId(), "Plug&ins")
+        # item = menu.Append(wx.NewIdRef(count=1), "Plug&ins")
         # self.Bind(wx.EVT_MENU, self.pluginManager, item)
-        menu.AppendSeparator()
-        msg = _translate("Close PsychoPy Builder")
-        item = menu.Append(wx.ID_ANY, msg)
-        self.Bind(wx.EVT_MENU, self.closeFrame, id=item.GetId())
         self.fileMenu.AppendSeparator()
         self.fileMenu.Append(wx.ID_EXIT,
                              _translate("&Quit\t%s") % keys['quit'],
@@ -344,6 +370,13 @@ class BuilderFrame(wx.Frame, ThemeMixin):
         self.Bind(wx.EVT_MENU, self.redo, id=wx.ID_REDO)
         menu.Append(wx.ID_PASTE, _translate("&Paste\t%s") % keys['paste'])
         self.Bind(wx.EVT_MENU, self.paste, id=wx.ID_PASTE)
+
+        item = menu.Append(
+            wx.ID_ANY,
+            _translate("&Find in experiment...\t%s") % keys['builderFind'],
+            _translate("Search the whole experiment for a specific term")
+        )
+        self.Bind(wx.EVT_MENU, self.onFindInExperiment, item)
 
         # ---_view---#000000#FFFFFF-------------------------------------------
         self.viewMenu = wx.Menu()
@@ -370,12 +403,12 @@ class BuilderFrame(wx.Frame, ThemeMixin):
                            _translate("&Flow Larger\t%s") % self.app.keys[
                                'largerFlow'],
                            _translate("Larger flow items"))
-        self.Bind(wx.EVT_MENU, self.flowPanel.increaseSize, item)
+        self.Bind(wx.EVT_MENU, self.flowPanel.canvas.increaseSize, item)
         item = menu.Append(wx.ID_ANY,
                            _translate("&Flow Smaller\t%s") % self.app.keys[
                                'smallerFlow'],
                            _translate("Smaller flow items"))
-        self.Bind(wx.EVT_MENU, self.flowPanel.decreaseSize, item)
+        self.Bind(wx.EVT_MENU, self.flowPanel.canvas.decreaseSize, item)
         item = menu.Append(wx.ID_ANY,
                            _translate("&Routine Larger\t%s") % keys[
                                'largerRoutine'],
@@ -387,10 +420,13 @@ class BuilderFrame(wx.Frame, ThemeMixin):
                            _translate("Smaller routine items"))
         self.Bind(wx.EVT_MENU, self.routinePanel.decreaseSize, item)
         menu.AppendSeparator()
-        # Add Theme Switcher
-        self.themesMenu = ThemeSwitcher(self)
-        menu.AppendSubMenu(self.themesMenu,
-                               _translate("Themes"))
+
+        # Frame switcher
+        FrameSwitcher.makeViewSwitcherButtons(menu, frame=self, app=self.app)
+
+        # Theme switcher
+        self.themesMenu = ThemeSwitcher(app=self.app)
+        menu.AppendSubMenu(self.themesMenu, _translate("&Themes"))
 
         # ---_tools ---#000000#FFFFFF-----------------------------------------
         self.toolsMenu = wx.Menu()
@@ -406,9 +442,9 @@ class BuilderFrame(wx.Frame, ThemeMixin):
                            _translate("Compile the exp to a script"))
         self.Bind(wx.EVT_MENU, self.compileScript, item)
         self.bldrRun = menu.Append(wx.ID_ANY,
-                           _translate("Run\t%s") % keys['runScript'],
+                           _translate("Run/pilot\t%s") % keys['runScript'],
                            _translate("Run the current script"))
-        self.Bind(wx.EVT_MENU, self.runFile, self.bldrRun, id=self.bldrRun)
+        self.Bind(wx.EVT_MENU, self.onRunShortcut, self.bldrRun, id=self.bldrRun)
         item = menu.Append(wx.ID_ANY,
                            _translate("Send to runner\t%s") % keys['runnerScript'],
                            _translate("Send current script to runner"))
@@ -419,6 +455,10 @@ class BuilderFrame(wx.Frame, ThemeMixin):
                            _translate("Update PsychoPy to the latest, or a "
                                       "specific, version"))
         self.Bind(wx.EVT_MENU, self.app.openUpdater, item)
+        item = menu.Append(wx.ID_ANY,
+                           _translate("Plugin/packages manager..."),
+                           _translate("Manage Python packages and optional plugins for PsychoPy"))
+        self.Bind(wx.EVT_MENU, self.openPluginManager, item)
         if hasattr(self.app, 'benchmarkWizard'):
             item = menu.Append(wx.ID_ANY,
                                _translate("Benchmark wizard"),
@@ -428,8 +468,15 @@ class BuilderFrame(wx.Frame, ThemeMixin):
 
         # ---_experiment---#000000#FFFFFF-------------------------------------
         self.expMenu = wx.Menu()
-        menuBar.Append(self.expMenu, _translate('&Experiment'))
+        menuBar.Append(self.expMenu, _translate('E&xperiment'))
         menu = self.expMenu
+
+        item = menu.Append(wx.ID_ANY,
+                           _translate("Experiment &Settings\t%s") % keys['expSettings'],
+                           _translate("Edit experiment settings"))
+        self.Bind(wx.EVT_MENU, self.setExperimentSettings, item)
+        menu.AppendSeparator()
+        
         item = menu.Append(wx.ID_ANY,
                            _translate("&New Routine\t%s") % keys['newRoutine'],
                            _translate("Create a new routine (e.g. the trial "
@@ -469,11 +516,11 @@ class BuilderFrame(wx.Frame, ThemeMixin):
                            _translate(
                                "Select one of your routines to be inserted"
                                " into the experiment flow"))
-        self.Bind(wx.EVT_MENU, self.flowPanel.onInsertRoutine, item)
+        self.Bind(wx.EVT_MENU, self.flowPanel.canvas.onInsertRoutine, item)
         item = menu.Append(wx.ID_ANY,
                            _translate("Insert Loop in Flow"),
                            _translate("Create a new loop in your flow window"))
-        self.Bind(wx.EVT_MENU, self.flowPanel.insertLoop, item)
+        self.Bind(wx.EVT_MENU, self.flowPanel.canvas.insertLoop, item)
         menu.AppendSeparator()
 
         item = menu.Append(wx.ID_ANY,
@@ -512,12 +559,11 @@ class BuilderFrame(wx.Frame, ThemeMixin):
 
         # ---_onlineStudies---#000000#FFFFFF-------------------------------------------
         self.pavloviaMenu = pavlovia_ui.menu.PavloviaMenu(parent=self)
-        menuBar.Append(self.pavloviaMenu, _translate("Pavlovia.org"))
+        menuBar.Append(self.pavloviaMenu, _translate("&Pavlovia.org"))
 
         # ---_window---#000000#FFFFFF-----------------------------------------
         self.windowMenu = FrameSwitcher(self)
-        menuBar.Append(self.windowMenu,
-                    _translate("Window"))
+        menuBar.Append(self.windowMenu, _translate("&Window"))
 
         # ---_help---#000000#FFFFFF-------------------------------------------
         self.helpMenu = wx.Menu()
@@ -593,8 +639,14 @@ class BuilderFrame(wx.Frame, ThemeMixin):
     def onResize(self, event):
         """Called when the frame is resized."""
         self.componentButtons.Refresh()
-        self.flowPanel.Refresh()
+        self.flowPanel.canvas.Refresh()
         event.Skip()
+
+    def onShow(self, event):
+        """Called when the frame is shown"""
+        event.Skip()
+        # if README was updated when frame wasn't shown, it won't be show either - so update again
+        self.updateReadme()
 
     @property
     def filename(self):
@@ -603,21 +655,28 @@ class BuilderFrame(wx.Frame, ThemeMixin):
 
     @filename.setter
     def filename(self, value):
-        self._filename = value
-        # Skip if there's no toolbar
-        if not hasattr(self, "toolbar"):
+        if value is None:
+            # mark nonexistant
+            self.fileExists = False
+            # keep placeholder name for labels and etc.
+            self._filename = Path("untitled.psyexp")
+        else:
+            # path-ise and set
+            self._filename = Path(value)
+            # mark existant
+            self.fileExists = Path(value).is_file()
+        # enable/disable reveal button
+        if hasattr(self, "menuIDs"):
+            self.fileMenu.Enable(self.menuIDs.ID_REVEAL, self.fileExists)
+        # skip if there's no ribbon
+        if not hasattr(self, "ribbon"):
             return
-        # Enable/disable compile buttons
-        if 'compile_py' in self.toolbar.buttons:
-            self.toolbar.EnableTool(
-                self.toolbar.buttons['compile_py'].GetId(),
-                Path(value).is_file()
-            )
-        if 'compile_js' in self.toolbar.buttons:
-            self.toolbar.EnableTool(
-                self.toolbar.buttons['compile_js'].GetId(),
-                Path(value).is_file()
-            )
+        # enable/disable compile buttons
+        for key in ('compile_py', 'compile_js'):
+            if key in self.ribbon.buttons:
+                self.ribbon.buttons[key].Enable(
+                    self._filename.is_file()
+                )
 
     def fileNew(self, event=None, closeCurrent=True):
         """Create a default experiment (maybe an empty one instead)
@@ -628,7 +687,7 @@ class BuilderFrame(wx.Frame, ThemeMixin):
             if not self.fileClose(updateViews=False):
                 # close the existing (and prompt for save if necess)
                 return False
-        self.filename = 'untitled.psyexp'
+        self.filename = None
         self.exp = experiment.Experiment(prefs=self.app.prefs)
         defaultName = 'trial'
         # create the trial routine as an example
@@ -645,6 +704,10 @@ class BuilderFrame(wx.Frame, ThemeMixin):
         #             startType='time (s)', startVal=0.0,
         #             stopType='duration (s)', stopVal=0.5)
         # routine.addComponent(ISI)
+        # set run mode silently and update icons
+        self.ribbon.buttons['pyswitch'].setMode(self.exp.runMode, silent=True)
+        self.updateRunModeIcons()
+        # update undo stack
         self.resetUndoStack()
         self.setIsModified(False)
         self.updateAllViews()
@@ -654,23 +717,34 @@ class BuilderFrame(wx.Frame, ThemeMixin):
         """Open a FileDialog, then load the file if possible.
         """
         if filename is None:
+            # Set wildcard
             if sys.platform != 'darwin':
                 wildcard = _translate("PsychoPy experiments (*.psyexp)|*.psyexp|Any file (*.*)|*.*")
             else:
                 wildcard = _translate("PsychoPy experiments (*.psyexp)|*.psyexp|Any file (*.*)|*")
-            dlg = wx.FileDialog(self, message=_translate("Open file ..."),
-                                style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST,
-                                wildcard=wildcard)
+            # get path of current file (or home dir to avoid temp)
+            initPath = str(self.filename.parent)
+            if self.fileExists:
+                dlg = wx.FileDialog(self, message=_translate("Open file ..."),
+                                    defaultDir=initPath,
+                                    style=wx.FD_OPEN,
+                                    wildcard=wildcard)
+            else:
+                dlg = wx.FileDialog(self, message=_translate("Open file ..."),
+                                    style=wx.FD_OPEN,
+                                    wildcard=wildcard)
             if dlg.ShowModal() != wx.ID_OK:
                 return 0
             filename = dlg.GetPath()
 
+        filename = str(filename)
         # did user try to open a script in Builder?
         if filename.endswith('.py'):
             self.app.showCoder()  # ensures that a coder window exists
             self.app.coder.setCurrentDoc(filename)
             self.app.coder.setFileModified(False)
             return
+
         with WindowFrozen(ctrl=self):
             # try to pause rendering until all panels updated
             if closeCurrent:
@@ -680,6 +754,9 @@ class BuilderFrame(wx.Frame, ThemeMixin):
             self.exp = experiment.Experiment(prefs=self.app.prefs)
             try:
                 self.exp.loadFromXML(filename)
+                # set run mode silently and update buttons accordingly
+                self.ribbon.buttons['pyswitch'].setMode(self.exp.runMode, silent=True)
+                self.updateRunModeIcons()
             except Exception:
                 print(u"Failed to load {}. Please send the following to"
                       u" the PsychoPy user list".format(filename))
@@ -692,26 +769,52 @@ class BuilderFrame(wx.Frame, ThemeMixin):
             # routinePanel.redrawRoutines(), called by self.updateAllViews()
             # update the views
             self.updateAllViews()  # if frozen effect will be visible on thaw
-        self.updateReadme()
+
+        # Show README
+        if self.prefs['alwaysShowReadme']:
+            # If prefs are to always show README, show if populated
+            self.updateReadme()
+        else:
+            # Otherwise update so we have the object, but don't show until asked
+            self.updateReadme(show=False)
+
         self.fileHistory.AddFileToHistory(filename)
         self.htmlPath = None  # so we won't accidentally save to other html exp
 
         if self.app.runner:
             self.app.runner.addTask(fileName=self.filename)  # Add to Runner
 
-        try:
-            self.project = pavlovia.getProject(filename)
-        except Exception as e:  # failed for
-            self.project = None
-            print(e)
+        self.project = pavlovia.getProject(filename)
         self.app.updateWindowMenu()
+
+    def fileReveal(self, evt=None):
+        """
+        Reveal the current file in the system file explorer.
+        """
+        # get current dir
+        if self.fileExists:
+            folder = Path(self.filename).parent
+        else:
+            folder = Path().home()
+        # choose a command according to OS
+        if sys.platform in ['win32']:
+            comm = "explorer"
+        elif sys.platform in ['darwin']:
+            comm = "open"
+        elif sys.platform in ['linux', 'linux2']:
+            comm = "dolphin"
+        # use command to open folder
+        subprocess.call(f"{comm} {folder}", shell=True)
 
     def fileSave(self, event=None, filename=None):
         """Save file, revert to SaveAs if the file hasn't yet been saved
         """
         if filename is None:
             filename = self.filename
-        if filename.startswith('untitled'):
+        else:
+            filename = Path(filename)
+
+        if not self.fileExists:
             if not self.fileSaveAs(filename):
                 return False  # the user cancelled during saveAs
         else:
@@ -733,9 +836,17 @@ class BuilderFrame(wx.Frame, ThemeMixin):
             usingDefaultName = True
         else:
             usingDefaultName = False
+        # force filename to Path
         if filename is None:
             filename = self.filename
-        initPath, filename = os.path.split(filename)
+        else:
+            filename = Path(filename)
+        # get parent and filename
+        initPath = filename.parent
+        filename = filename.name
+        # substitute temp dir for home
+        if not self.fileExists:
+            initPath = Path.home()
 
         if sys.platform != 'darwin':
             wildcard = _translate("PsychoPy experiments (*.psyexp)|*.psyexp|Any file (*.*)|*.*")
@@ -743,7 +854,7 @@ class BuilderFrame(wx.Frame, ThemeMixin):
             wildcard = _translate("PsychoPy experiments (*.psyexp)|*.psyexp|Any file (*.*)|*")
         returnVal = False
         dlg = wx.FileDialog(
-            self, message=_translate("Save file as ..."), defaultDir=initPath,
+            self, message=_translate("Save file as ..."), defaultDir=str(initPath),
             defaultFile=filename, style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT,
             wildcard=wildcard)
 
@@ -756,100 +867,131 @@ class BuilderFrame(wx.Frame, ThemeMixin):
                     os.path.split(newPath)[1])[0]
                 self.exp.setExpName(newShortName)
             # actually save
-            self.fileSave(event=None, filename=newPath)
             self.filename = newPath
+            self.fileExists = True
+            self.fileSave(event=None, filename=newPath)
+            # enable/disable reveal button
+            if hasattr(self, "menuIDs"):
+                self.fileMenu.Enable(self.menuIDs.ID_REVEAL, True)
+            # update pavlovia project
+            self.project = pavlovia.getProject(filename)
             returnVal = 1
         dlg.Destroy()
 
         self.updateWindowTitle()
+        # update README in case the file path has changed
+        if self.prefs['alwaysShowReadme']:
+            # if prefs are to always show README, show if populated
+            self.updateReadme()
+        else:
+            # otherwise update so we have the object, but don't show until asked
+            self.updateReadme(show=False)
         return returnVal
 
     def fileExport(self, event=None, htmlPath=None):
         """Exports the script as an HTML file (PsychoJS library)
         """
         # get path if not given one
-        expPath, expName = os.path.split(self.filename)
         if htmlPath is None:
             htmlPath = self._getHtmlPath(self.filename)
         if not htmlPath:
             return
-        dlg = ExportFileDialog(self, wx.ID_ANY,
-                               title=_translate("Export HTML file"),
-                               filePath=htmlPath,
-                               exp=self.exp)
 
-        export = dlg.exportOnSave
-        if self.exp.settings.params['exportHTML'].val == 'manually':
-            retVal = dlg.ShowModal()
-            self.exp.settings.params['exportHTML'].val = export.GetString(export.GetCurrentSelection())
-            if retVal != wx.ID_OK:  # User cancelled export
-                return False
-
-        exportPath = os.path.join(htmlPath, expName.replace('.psyexp', '.js'))
-        self.generateScript(experimentPath=exportPath,
-                            exp=self.exp,
-                            target="PsychoJS")
+        exportPath = os.path.join(htmlPath, self.exp.name + '.js')
+        exportPath = self.generateScript(
+            outfile=exportPath,
+            exp=self.exp,
+            target="PsychoJS"
+        )
         # Open exported files
-        self.app.showCoder()
-        self.app.coder.fileOpen(filename=exportPath)
-        self.app.coder.fileOpen(filename=htmlPath)
+        self.app.showCoder(fileList=[exportPath])
+        self.app.coder.fileReload(event=None, filename=exportPath)
 
     def editREADME(self, event):
-        folder = Path(self.filename).parent
-        if folder == folder.parent:
+        if self.filename is None:
             dlg = wx.MessageDialog(
                 self,
                 _translate("Please save experiment before editing the README file"),
                 _translate("No readme file"),
                 wx.OK | wx.ICON_WARNING | wx.CENTRE)
             dlg.ShowModal()
-            return
-        self.updateReadme()
-        self.showReadme()
-        return
+        else:
+            self.updateReadme(show=True)
 
-    def getShortFilename(self):
-        """returns the filename without path or extension
+    def getShortFilename(self, withExt=False):
         """
-        return os.path.splitext(os.path.split(self.filename)[1])[0]
+        Returns the filename without path
+
+        Parameters
+        ----------
+        withExt : bool
+            Should the returned filename include the file extension? False by default.
+        """
+        # get file stem
+        shortName = self.filename.stem
+        ext = self.filename.suffix
+        # append extension if requested
+        if withExt:
+            shortName += ext
+
+        return shortName
 
     # def pluginManager(self, evt=None, value=True):
-    #     """Show the plugin manger frame."""
+    #     """Show the plugin manager frame."""
     #     PluginManagerFrame(self).ShowModal()
 
-    def updateReadme(self):
+    def onFindInExperiment(self, evt=None):
+        dlg = BuilderFindDlg(frame=self, exp=self.exp)
+        dlg.Show()
+
+    def updateReadme(self, show=None):
         """Check whether there is a readme file in this folder and try to show
+
+        Parameters
+        ==========
+        show : bool or None
+            If True, always show Readme frame.
+            If False, never show Readme frame.
+            If None, show only when there is content.
         """
-        # create the frame if we don't have one yet
-        if self.readmeFrame is None:
-            self.readmeFrame = ReadmeFrame(parent=self)
-        # look for a readme file
-        if self.filename and self.filename != 'untitled.psyexp':
-            dirname = os.path.dirname(self.filename)
-            possibles = glob.glob(os.path.join(dirname, 'readme*'))
-            if len(possibles) == 0:
-                possibles = glob.glob(os.path.join(dirname, 'Readme*'))
-                possibles.extend(glob.glob(os.path.join(dirname, 'README*')))
-            # still haven't found a file so use default name
-            if len(possibles) == 0:
-                self.readmeFilename = os.path.join(
-                    dirname, 'readme.md')  # use this as our default
-            else:
-                self.readmeFilename = possibles[0]  # take the first one found
+        # Make sure we have a file
+        dirname = self.filename.parent
+        possibles = list(dirname.glob('readme*'))
+        if len(possibles) == 0:
+            possibles = list(dirname.glob('Readme*'))
+            possibles.extend(dirname.glob('README*'))
+
+        # still haven't found a file so use default name
+        if len(possibles) == 0:
+            self.readmeFilename = str(dirname / 'readme.md')  # use this as our default
         else:
-            self.readmeFilename = None
-        self.readmeFrame.setFile(self.readmeFilename)
-        content = self.readmeFrame.ctrl.ToText()
-        if content and self.prefs['alwaysShowReadme']:
-            self.showReadme()
+            self.readmeFilename = str(possibles[0])  # take the first one found
+
+        # Make sure we have a frame
+        if self.readmeFrame is None:
+            self.readmeFrame = ReadmeFrame(
+                parent=self, filename=self.readmeFilename
+            )
+
+        # Set file
+        if self.fileExists:
+            self.readmeFrame.setFile(self.readmeFilename)
+        else:
+            self.readmeFrame.setFile(None)
+            show = False
+        self.readmeFrame.ctrl.load()
+
+        # Show/hide frame as appropriate
+        if show is None:
+            show = len(self.readmeFrame.ctrl.getValue()) > 0
+        show = show and self.IsShown()
+        self.readmeFrame.show(show)
 
     def showReadme(self, evt=None, value=True):
         """Shows Readme file
         """
-        if not self.readmeFrame:
-            self.updateReadme()
         if not self.readmeFrame.IsShown():
-            self.readmeFrame.Show(value)
+            self.readmeFrame.show(value)
 
     def toggleReadme(self, evt=None):
         """Toggles visibility of Readme file
@@ -871,7 +1013,7 @@ class BuilderFrame(wx.Frame, ThemeMixin):
     def checkSave(self):
         """Check whether we need to save before quitting
         """
-        if hasattr(self, 'isModified') and self.isModified:
+        if hasattr(self, 'isModified') and self.isModified and not self.app.testMode:
             self.Show(True)
             self.Raise()
             self.app.SetTopWindow(self)
@@ -895,10 +1037,8 @@ class BuilderFrame(wx.Frame, ThemeMixin):
             ok = self.checkSave()
             if not ok:
                 return False  # user cancelled
-        if self.filename is None:
-            frameData = self.appData['defaultFrame']
-        else:
-            frameData = dict(self.appData['defaultFrame'])
+        frameData = self.appData['defaultFrame']
+        if self.fileExists:
             self.appData['prevFiles'].append(self.filename)
 
             # get size and window layout info
@@ -930,7 +1070,11 @@ class BuilderFrame(wx.Frame, ThemeMixin):
         self.appData['fileHistory'] = copy.copy(tmp[-fhMax:])
 
         # assign the data to this filename
-        self.appData['frames'][self.filename] = frameData
+        if (
+            str(self.filename) not in self.appData['frames']
+            and str(self.filename) not in self.appData
+        ):
+            self.appData['frames'][str(self.filename)] = frameData
         # save the display data only for those frames in the history:
         tmp2 = {}
         for f in self.appData['frames']:
@@ -940,7 +1084,7 @@ class BuilderFrame(wx.Frame, ThemeMixin):
 
         # close self
         self.routinePanel.removePages()
-        self.filename = 'untitled.psyexp'
+        self.filename = None
         # add the current exp as the start point for undo:
         self.resetUndoStack()
         if updateViews:
@@ -950,8 +1094,9 @@ class BuilderFrame(wx.Frame, ThemeMixin):
     def updateAllViews(self):
         """Updates Flow Panel, Routine Panel, and Window Title simultaneously
         """
-        self.flowPanel.draw()
+        self.flowPanel.canvas.draw()
         self.routinePanel.redrawRoutines()
+        self.componentButtons.Refresh()
         self.updateWindowTitle()
 
     def layoutPanes(self):
@@ -975,17 +1120,25 @@ class BuilderFrame(wx.Frame, ThemeMixin):
     def resetPrefs(self, event):
         """Reset preferences to default"""
         # Present "are you sure" dialog
-        dlg = wx.MessageDialog(self, _translate("Are you sure you want to reset your preferences? This cannot be undone."),
-                               caption="Reset Preferences...", style=wx.ICON_WARNING | wx.CANCEL)
+        dlg = wx.MessageDialog(
+            self, _translate(
+                "Are you sure you want to reset your preferences? This cannot "
+                "be undone."),
+            caption="Reset Preferences...",
+            style=wx.ICON_WARNING | wx.CANCEL)
         dlg.SetOKCancelLabels(
             _translate("I'm sure"),
             _translate("Wait, go back!")
         )
         if dlg.ShowModal() == wx.ID_OK:
-            # If okay is pressed, remove prefs file (meaning a new one will be created on next restart)
+            # If okay is pressed, remove prefs file (meaning a new one will be
+            # created on next restart)
             os.remove(prefs.paths['userPrefsFile'])
             # Show confirmation
-            dlg = wx.MessageDialog(self, _translate("Done! Your preferences have been reset. Changes will be applied when you next open PsychoPy."))
+            dlg = wx.MessageDialog(
+                self, _translate(
+                    "Done! Your preferences have been reset. Changes will be "
+                    "applied when you next open PsychoPy."))
             dlg.ShowModal()
         else:
             pass
@@ -994,9 +1147,8 @@ class BuilderFrame(wx.Frame, ThemeMixin):
         """Defines behavior to update window Title
         """
         if newTitle is None:
-            shortName = os.path.split(self.filename)[-1]
-            newTitle = '%s - PsychoPy Builder (v%s)' % (shortName, self.app.version)
-        self.SetTitle(newTitle)
+            newTitle = self.getShortFilename(withExt=True)
+        self.setTitle(title=self.winTitle, document=newTitle)
 
     def setIsModified(self, newVal=None):
         """Sets current modified status and updates save icon accordingly.
@@ -1011,8 +1163,9 @@ class BuilderFrame(wx.Frame, ThemeMixin):
             newVal = self.getIsModified()
         else:
             self.isModified = newVal
-        if hasattr(self, 'bldrBtnSave'):
-            self.toolbar.EnableTool(self.bldrBtnSave.Id, newVal)
+        # get ribbon buttons
+        if 'save' in self.ribbon.buttons:
+            self.ribbon.buttons['save'].Enable(newVal)
         self.fileMenu.Enable(wx.ID_SAVE, newVal)
 
     def getIsModified(self):
@@ -1109,8 +1262,8 @@ class BuilderFrame(wx.Frame, ThemeMixin):
             label = txt % fmt
             enable = True
         self._undoLabel.SetItemLabel(label)
-        if hasattr(self, 'bldrBtnUndo'):
-            self.toolbar.EnableTool(self.bldrBtnUndo.Id, enable)
+        if 'undo' in self.ribbon.buttons:
+            self.ribbon.buttons['undo'].Enable(enable)
         self.editMenu.Enable(wx.ID_UNDO, enable)
 
         # check redo
@@ -1124,8 +1277,8 @@ class BuilderFrame(wx.Frame, ThemeMixin):
             label = txt % fmt
             enable = True
         self._redoLabel.SetItemLabel(label)
-        if hasattr(self, 'bldrBtnRedo'):
-            self.toolbar.EnableTool(self.bldrBtnRedo.Id, enable)
+        if 'redo' in self.ribbon.buttons:
+            self.ribbon.buttons['redo'].Enable(enable)
         self.editMenu.Enable(wx.ID_REDO, enable)
 
     def demosUnpack(self, event=None):
@@ -1146,7 +1299,8 @@ class BuilderFrame(wx.Frame, ThemeMixin):
                     unpackFolder)
         self.prefs['unpackedDemosDir'] = unpackFolder
         self.app.prefs.saveUserPrefs()
-        updateDemosMenu(self, self.demosMenu, self.prefs['unpackedDemosDir'], ext=".psyexp")
+        updateDemosMenu(self, self.demosMenu, self.prefs['unpackedDemosDir'],
+                        ext=".psyexp")
 
     def demoLoad(self, event=None):
         """Defines Demo Loading Event."""
@@ -1171,37 +1325,96 @@ class BuilderFrame(wx.Frame, ThemeMixin):
     def openPavloviaDemos(self, event=None):
         webbrowser.open("https://pavlovia.org/explore")
 
-    def runFile(self, event=None):
-        """Open Runner for running the psyexp file."""
-        if not os.path.exists(self.filename):
+    def sendToRunner(self, evt=None):
+        """
+        Send the current file to the Runner.
+        """
+        # Check whether file is truly untitled (not just saved as untitled)
+        if not self.fileExists:
             ok = self.fileSave(self.filename)
             if not ok:
-                return  # save file before compiling script
+                return False  # save file before compiling script
 
         if self.getIsModified():
             ok = self.fileSave(self.filename)
             if not ok:
-                return  # save file before compiling script
+                return False  # save file before compiling script
         self.app.showRunner()
-        self.stdoutFrame.addTask(fileName=self.filename)
+        self.app.runner.addTask(fileName=self.filename)
         self.app.runner.Raise()
-        if event:
-            if event.Id in [self.bldrBtnRun.Id, self.bldrRun.Id]:
-                self.app.runner.panel.runLocal(event)
-            else:
-                self.app.showRunner()
+        self.app.showRunner()
+
+        return True
+
+    def updateRunModeIcons(self, evt=None):
+        """
+        Function to update run/pilot icons according to run mode
+        """
+        mode = self.ribbon.buttons['pyswitch'].mode
+        # show/hide run buttons
+        for key in ("pyrun", "jsrun", "sendRunner"):
+            self.ribbon.buttons[key].Show(mode)
+        # hide/show pilot buttons
+        for key in ("pypilot", "jspilot", "pilotRunner"):
+            self.ribbon.buttons[key].Show(not mode)
+        # update
+        self.ribbon.Layout()
+
+    def onRunModeToggle(self, evt):
+        """
+        Function to execute when switching between pilot and run modes
+        """
+        mode = evt.GetInt()
+        # update icons
+        self.updateRunModeIcons()
+        # update experiment mode
+        if self.exp is not None and self.exp.runMode != mode:
+            self.exp.runMode = mode
+            # mark as modified
+            self.setIsModified(True)
+        # update
+        self.ribbon.Update()
+        self.ribbon.Refresh()
+        self.ribbon.Layout()
+
+    def onRunShortcut(self, evt=None):
+        """
+        Callback for when the run shortcut is pressed - will either run or pilot depending on run mode
+        """
+        # do nothing if we have no experiment
+        if self.exp is None:
+            return
+        # run/pilot according to mode
+        if self.exp.runMode:
+            self.runFile(evt)
+        else:
+            self.pilotFile(evt)
+
+    def runFile(self, event=None):
+        """
+        Send the current file to the Runner and run it.
+        """
+        if self.sendToRunner(event):
+            self.app.runner.panel.runLocal(event)
+
+    def pilotFile(self, event=None):
+        """
+        Send the current file to the Runner and run it in pilot mode.
+        """
+        if self.sendToRunner(event):
+            self.app.runner.panel.pilotLocal(event)
 
     def onCopyRoutine(self, event=None):
         """copy the current routine from self.routinePanel
         to self.app.copiedRoutine.
         """
-        r = copy.deepcopy(self.routinePanel.getCurrentRoutine())
+        r = self.routinePanel.getCurrentRoutine().copy()
         if r is not None:
             self.app.copiedRoutine = r
 
     def onPasteRoutine(self, event=None):
         """Paste the current routine from self.app.copiedRoutine to a new page
-        in self.routinePanel after promting for a new name.
+        in self.routinePanel after prompting for a new name.
         """
         if self.app.copiedRoutine is None:
             return -1
@@ -1214,22 +1427,29 @@ class BuilderFrame(wx.Frame, ThemeMixin):
                                  caption=_translate('Paste Routine'))
         if dlg.ShowModal() == wx.ID_OK:
             routineName = dlg.GetValue()
-            newRoutine = copy.deepcopy(self.app.copiedRoutine)
             if not routineName:
                 routineName = defaultName
-            newRoutine.name = self.exp.namespace.makeValid(routineName)
-            newRoutine.params['name'] = newRoutine.name
-            self.exp.namespace.add(newRoutine.name)
-            # add to the experiment
-            self.exp.addRoutine(newRoutine.name, newRoutine)
-            for newComp in newRoutine:  # routine == list of components
-                newName = self.exp.namespace.makeValid(newComp.params['name'])
-                self.exp.namespace.add(newName)
-                newComp.params['name'].val = newName
-            # could do redrawRoutines but would be slower?
-            self.routinePanel.addRoutinePage(newRoutine.name, newRoutine)
-            self.addToUndoStack("PASTE Routine `%s`" % newRoutine.name)
+            newRoutine = self.app.copiedRoutine.copy()
+            self.pasteRoutine(newRoutine, routineName)
         dlg.Destroy()
+
+    def pasteRoutine(self, newRoutine, routineName):
+        """
+        Paste a copied Routine into the current Experiment. Returns a copy of that Routine
+        """
+        newRoutine.name = self.exp.namespace.makeValid(routineName, prefix="routine")
+        newRoutine.exp = self.exp
+        # add to the experiment
+        self.exp.addRoutine(newRoutine.name, newRoutine)
+        for newComp in newRoutine:  # routine == list of components
+            newName = self.exp.namespace.makeValid(newComp.params['name'])
+            self.exp.namespace.add(newName)
+            newComp.params['name'].val = newName
+            newComp.exp = self.exp
+        # could do redrawRoutines but would be slower?
+        self.routinePanel.addRoutinePage(newRoutine.name, newRoutine)
+        self.routinePanel.setCurrentRoutine(newRoutine)
+        return newRoutine
 
     def onPasteCompon(self, event=None):
         """
@@ -1257,9 +1477,15 @@ class BuilderFrame(wx.Frame, ThemeMixin):
         else:
             helpUrl = None
         title = '%s Properties' % self.exp.getExpName()
-        dlg = DlgExperimentProperties(frame=self, element=component, experiment=self.exp)
+        dlg = DlgExperimentProperties(
+            frame=self, element=component, experiment=self.exp, timeout=timeout)
+
         if dlg.OK:
+            # add to undo stack
             self.addToUndoStack("EDIT experiment settings")
+            # update run mode
+            self.ribbon.buttons['pyswitch'].setMode(self.exp.runMode)
+            # mark modified
             self.setIsModified(True)
 
     def addRoutine(self, event=None):
@@ -1267,43 +1493,52 @@ class BuilderFrame(wx.Frame, ThemeMixin):
         """
         self.routinePanel.createNewRoutine()
 
-    def renameRoutine(self, name, event=None, returnName=True):
+    def renameRoutine(self, name, event=None):
         """Defines ability to rename routine in the routine panel
         """
         # get notebook details
-        currentRoutine = self.routinePanel.getCurrentPage()
-        currentRoutineIndex = self.routinePanel.GetPageIndex(currentRoutine)
         routine = self.routinePanel.GetPage(
             self.routinePanel.GetSelection()).routine
         oldName = routine.name
         msg = _translate("What is the new name for the Routine?")
         dlg = wx.TextEntryDialog(self, message=msg, value=oldName,
                                  caption=_translate('Rename'))
-        exp = self.exp
         if dlg.ShowModal() == wx.ID_OK:
             name = dlg.GetValue()
-            # silently auto-adjust the name to be valid, and register in the
-            # namespace:
-            name = exp.namespace.makeValid(
-                name, prefix='routine')
-            if oldName in self.exp.routines:
-                # Swap old with new names
-                self.exp.routines[oldName].name = name
-                self.exp.routines[name] = self.exp.routines.pop(oldName)
-                for comp in self.exp.routines[name]:
-                    comp.parentName = name
-                self.exp.namespace.rename(oldName, name)
-                self.routinePanel.renameRoutinePage(currentRoutineIndex, name)
-                self.addToUndoStack("`RENAME Routine `%s`" % oldName)
-                dlg.Destroy()
-                self.flowPanel.draw()
+            self._doRenameRoutine(oldName=oldName, newName=name)
+            dlg.Destroy()
+
+    def _doRenameRoutine(self, oldName, newName):
+        # silently auto-adjust the name to be valid, and register in the
+        # namespace:
+        name = self.exp.namespace.makeValid(newName, prefix='routine')
+        if oldName in self.exp.routines:
+            # Swap old with new names
+            self.exp.routines[oldName].name = name
+            self.exp.routines[name] = self.exp.routines.pop(oldName)
+            self.exp.namespace.rename(oldName, name)
+            currentRoutine = self.routinePanel.getCurrentPage()
+            currentRoutineIndex = self.routinePanel.GetPageIndex(currentRoutine)
+            self.routinePanel.renameRoutinePage(currentRoutineIndex, name)
+            self.addToUndoStack("`RENAME Routine `%s`" % oldName)
+            self.flowPanel.canvas.draw()
 
     def compileScript(self, event=None):
         """Defines compile script button behavior"""
-        fullPath = self.filename.replace('.psyexp', '.py')
-        self.generateScript(experimentPath=fullPath, exp=self.exp)
-        self.app.showCoder()  # make sure coder is visible
-        self.app.coder.fileNew(filepath=fullPath)
+        # save so we have a file to work off
+        saved = self.fileSave()
+        # if save cancelled, return now
+        if not saved:
+            return
+        # construct filename for py file
+        fullPath = self.filename.parent / (self.exp.name + '.py')
+        # write script
+        fullPath = self.generateScript(
+            outfile=str(fullPath),
+            exp=self.exp
+        )
+        # show it in Coder
+        self.app.showCoder(fileList=[fullPath])  # make sure coder is visible
         self.app.coder.fileReload(event=None, filename=fullPath)
 
     @property
@@ -1335,118 +1570,100 @@ class BuilderFrame(wx.Frame, ThemeMixin):
         if exportHtml == pref.lower():
             return True
 
-    def onPavloviaSync(self, evt=None):
-        if self._getExportPref('on sync'):
-            htmlPath = self._getHtmlPath(self.filename)
-            if htmlPath:
-                self.fileExport(htmlPath=htmlPath)
-            else:
-                return
+    def openPluginManager(self, evt=None):
+        dlg = psychopy.app.plugin_manager.dialog.EnvironmentManagerDlg(self)
+        dlg.Show()
+        
+        return dlg
 
-        self.enablePavloviaButton(['pavloviaSync', 'pavloviaRun'], False)
-        try:
-            retVal = pavlovia_ui.syncProject(parent=self, project=self.project)
-            pavlovia.knownProjects.save()  # update projects.json
-            self.gitFeedback(retVal)
-        finally:
-            self.enablePavloviaButton(['pavloviaSync', 'pavloviaRun'], True)
+    def onPavloviaCreate(self, evt=None):
+        if Path(self.filename).is_file():
+            # Save file
+            self.fileSave(self.filename)
+            # If allowed by prefs, export html and js files
+            if self._getExportPref('on sync'):
+                htmlPath = self._getHtmlPath(self.filename)
+                if htmlPath:
+                    self.fileExport(htmlPath=htmlPath)
+                else:
+                    return
+        # Get start path and name from builder/coder if possible
+        if self.filename:
+            file = Path(self.filename)
+            name = file.stem
+            path = file.parent
+        else:
+            name = path = ""
+        # Open dlg to create new project
+        createDlg = sync.CreateDlg(self,
+                                   user=pavlovia.getCurrentSession().user,
+                                   name=name,
+                                   path=path)
+        if createDlg.ShowModal() == wx.ID_OK and createDlg.project is not None:
+            self.project = createDlg.project
+        else:
+            return
+        # Do first sync
+        self.onPavloviaSync()
+
+    def onPavloviaSync(self, evt=None):
+        if Path(self.filename).is_file():
+            # Save file
+            self.fileSave(self.filename)
+            # If allowed by prefs, export html and js files
+            if self._getExportPref('on sync'):
+                htmlPath = self._getHtmlPath(self.filename)
+                if htmlPath:
+                    self.fileExport(htmlPath=htmlPath)
+                else:
+                    return
+        # Sync
+        pavlovia_ui.syncProject(parent=self, file=self.filename, project=self.project)
 
     def onPavloviaRun(self, evt=None):
-        if self._getExportPref('on save'):
-            self.fileSave()
-            retVal = pavlovia_ui.syncProject(parent=self, project=self.project,
-                                             closeFrameWhenDone=False)
-            self.gitFeedback(retVal)
-        elif self._getExportPref('on sync'):
-            self.fileExport(htmlPath=self._getHtmlPath(self.filename))
-            retVal = pavlovia_ui.syncProject(parent=self, project=self.project,
-                                             closeFrameWhenDone=False)
-            self.gitFeedback(retVal)
-        elif self._getExportPref('manually'):
-            # Check htmlpath and projects exists
-            noHtmlFolder = not os.path.isdir(self._getHtmlPath(self.filename))
-            noProject = not bool(pavlovia.getProject(self.filename))
-            if noHtmlFolder:
-                self.fileExport()
-            if noProject or noHtmlFolder:
-                retVal = pavlovia_ui.syncProject(parent=self, project=self.project,
-                                                 closeFrameWhenDone=False)
-                self.gitFeedback(retVal)
-        if self.project:
-            htmlPath = self.exp.settings.params['HTML path'].val
+        # Sync project
+        self.onPavloviaSync()
+
+        if self.project is not None:
+            # Update project status
             self.project.pavloviaStatus = 'ACTIVATED'
-            url = "https://pavlovia.org/run/{}/{}".format(self.project.id, htmlPath)
+            # Run
+            url = "https://pavlovia.org/run/{}".format(self.project['path_with_namespace'])
             wx.LaunchDefaultBrowser(url)
 
-    def enablePavloviaButton(self, buttons, enable):
-        """
-        Enables or disables Pavlovia buttons.
-
-        Parameters
-        ----------
-        name: string, list
-            Takes single buttons 'pavloviaSync', 'pavloviaRun', 'pavloviaSearch', 'pavloviaUser',
-            or multiple buttons in string 'pavloviaSync, pavloviaRun',
-            or comma separated list of strings ['pavloviaSync', 'pavloviaRun', ...].
-        enable: bool
-            True enables and False disables the button
-        """
-        if isinstance(buttons, str):
-            buttons = buttons.split(',')
-        for button in buttons:
-            self.toolbar.EnableTool(self.btnHandles[button.strip(' ')].GetId(), enable)
-
-    def setPavloviaUser(self, user):
-        # TODO: update user icon on button to user avatar
-        pass
-
-    def gitFeedback(self, val):
-        """
-        Set feedback color for the Pavlovia Sync toolbar button.
-
-        Parameters
-        ----------
-        val: int
-            Status of git sync. 1 for SUCCESS (green), 0 or -1 for FAIL (RED)
-        """
-        feedbackTime = 1500
-        colour = {0: "red", -1: "red", 1: "green"}
-        toolbarSize = 32
-
-        # Store original
-        origBtn = self.btnHandles['pavloviaSync'].NormalBitmap
-        # Create new feedback bitmap
-        feedbackBmp = self.app.iconCache.getBitmap(
-                name='{}globe.png'.format(colour[val]),
-                size=toolbarSize)
-
-        # Set feedback button
-        self.btnHandles['pavloviaSync'].SetNormalBitmap(feedbackBmp)
-        self.toolbar.Realize()
-        self.toolbar.Refresh()
-
-        # Reset button to default state after time
-        wx.CallLater(feedbackTime, self.btnHandles['pavloviaSync'].SetNormalBitmap, origBtn)
-        wx.CallLater(feedbackTime + 50, self.toolbar.Realize)
-        wx.CallLater(feedbackTime + 50, self.toolbar.Refresh)
+    def onPavloviaDebug(self, evt=None):
+        # Open runner
+        self.app.showRunner()
+        runner = self.app.runner
+        # Make sure we have a current file
+        if self.getIsModified() or not Path(self.filename).is_file():
+            saved = self.fileSave()
+            if not saved:
+                return
+        # Send current file to runner
+        runner.addTask(fileName=self.filename)
+        # Run debug function from runner
+        self.app.runner.panel.runOnlineDebug(evt=evt)
 
     @property
     def project(self):
         """A PavloviaProject object if one is known for this experiment
         """
-        if 'project' in self.__dict__ and self.__dict__['project']:
-            return self.__dict__['project']
-        elif self.filename and pavlovia.getProject(self.filename):
+        if hasattr(self, "_project"):
+            return self._project
+        elif self.fileExists:
             return pavlovia.getProject(self.filename)
         else:
             return None
 
     @project.setter
     def project(self, project):
-        self.__dict__['project'] = project
+        self._project = project
+
+        self.ribbon.buttons['pavproject'].updateInfo()
 
 
-class RoutinesNotebook(aui.AuiNotebook, ThemeMixin):
+class RoutinesNotebook(aui.AuiNotebook, handlers.ThemeMixin):
     """A notebook that stores one or more routines
     """
 
@@ -1455,26 +1672,20 @@ class RoutinesNotebook(aui.AuiNotebook, ThemeMixin):
         self.app = frame.app
         self.routineMaxSize = 2
         self.appData = self.app.prefs.appData
-        aui.AuiNotebook.__init__(self, frame, id)
+        aui.AuiNotebook.__init__(self, frame, id,
+            agwStyle=aui.AUI_NB_TAB_MOVE | aui.AUI_NB_CLOSE_ON_ACTIVE_TAB | aui.AUI_NB_WINDOWLIST_BUTTON)
         self.Bind(aui.EVT_AUINOTEBOOK_PAGE_CLOSE, self.onClosePane)
+        self.Bind(aui.EVT_AUINOTEBOOK_END_DRAG, self.onMoveTab)
 
         # double buffered better rendering except if retina
 
         self.SetDoubleBuffered(not self.frame.isRetina)
 
-        self._applyAppTheme()
+        # This needs to be done on init, otherwise it gets an outline
+        self.GetAuiManager().SetArtProvider(handlers.PsychopyDockArt())
+
         if not hasattr(self.frame, 'exp'):
             return  # we haven't yet added an exp
-
-    def _applyAppTheme(self, target=None):
-        self.SetArtProvider(PsychopyTabArt())
-        self.GetAuiManager().SetArtProvider(PsychopyDockArt())
-        for index in range(self.GetPageCount()):
-            page = self.GetPage(index)
-            # double buffered better rendering except if retina
-            self.SetDoubleBuffered(not self.frame.isRetina)
-            page._applyAppTheme()
-        self.Refresh()
 
     def getCurrentRoutine(self):
         routinePage = self.getCurrentPage()
@@ -1486,6 +1697,7 @@ class RoutinesNotebook(aui.AuiNotebook, ThemeMixin):
         for ii in range(self.GetPageCount()):
             if routine is self.GetPage(ii).routine:
                 self.SetSelection(ii)
+        self.frame.flowPanel.canvas.draw()
 
     def SetSelection(self, index, force=False):
         aui.AuiNotebook.SetSelection(self, index, force=force)
@@ -1517,46 +1729,88 @@ class RoutinesNotebook(aui.AuiNotebook, ThemeMixin):
             currId = self.GetSelection()
             self.DeletePage(currId)
 
-    def createNewRoutine(self, returnName=False):
+    def createNewRoutine(self, template=None):
         msg = _translate("What is the name for the new Routine? "
                          "(e.g. instr, trial, feedback)")
-        dlg = wx.TextEntryDialog(self, message=msg,
-                                 caption=_translate('New Routine'))
-        exp = self.frame.exp
+        dlg = DlgNewRoutine(self)
         routineName = None
         if dlg.ShowModal() == wx.ID_OK:
-            routineName = dlg.GetValue()
-            # silently auto-adjust the name to be valid, and register in the
-            # namespace:
-            routineName = exp.namespace.makeValid(
-                routineName, prefix='routine')
-            exp.namespace.add(routineName)  # add to the namespace
-            exp.addRoutine(routineName)  # add to the experiment
-            # then to the notebook:
-            self.addRoutinePage(routineName, exp.routines[routineName])
+            routineName = dlg.nameCtrl.GetValue()
+            routineName = self.frame.exp.namespace.makeValid(routineName, prefix="routine")
+            template = copy.deepcopy(dlg.selectedTemplate)
+            self.frame.pasteRoutine(template, routineName)
             self.frame.addToUndoStack("NEW Routine `%s`" % routineName)
         dlg.Destroy()
-        if returnName:
-            return routineName
+        return routineName
 
     def onClosePane(self, event=None):
-        """Close the pane and remove the routine from the exp
+        """Close the pane and remove the routine from the exp.
         """
-        routine = self.GetPage(event.GetSelection()).routine
+        currentPage = self.GetPage(event.GetSelection())
+        routine = currentPage.routine
         name = routine.name
-        # update experiment object, namespace, and flow window (if this is
-        # being used)
-        if name in self.frame.exp.routines:
-            # remove names of the routine and its components from namespace
-            _nsp = self.frame.exp.namespace
-            for c in self.frame.exp.routines[name]:
-                _nsp.remove(c.params['name'].val)
-            _nsp.remove(self.frame.exp.routines[name].name)
-            del self.frame.exp.routines[name]
+
+        # name is not valid for some reason
+        if name not in self.frame.exp.routines:
+            event.Skip()
+            return
+
+        # check if the user wants a prompt
+        showDlg = self.app.prefs.builder.get('confirmRoutineClose', False)
+        if showDlg:
+            # message to display
+            msg = _translate(
+                "Do you want to remove routine '{}' from the experiment?")
+
+            # dialog asking if the user wants to remove the routine
+            dlg = wx.MessageDialog(
+                self,
+                _translate(msg).format(name),
+                _translate('Remove routine?'),
+                wx.YES_NO | wx.NO_DEFAULT | wx.CENTRE | wx.STAY_ON_TOP)
+
+            # show the dialog and get the response
+            dlgResult = dlg.ShowModal()
+            dlg.Destroy()
+
+            if dlgResult == wx.ID_NO:  # if NO, stop the tab from closing
+                event.Veto()
+                return
+
+        # remove names of the routine and its components from namespace
+        _nsp = self.frame.exp.namespace
+        for c in self.frame.exp.routines[name]:
+            _nsp.remove(c.params['name'].val)
+        _nsp.remove(self.frame.exp.routines[name].name)
+        del self.frame.exp.routines[name]
+
         if routine in self.frame.exp.flow:
             self.frame.exp.flow.removeComponent(routine)
-            self.frame.flowPanel.draw()
+            self.frame.flowPanel.canvas.draw()
         self.frame.addToUndoStack("REMOVE Routine `%s`" % (name))
+
+    def onMoveTab(self, evt=None):
+        """
+        After moving tabs around, sorts Routines in the Experiment accordingly
+        and marks experiment as changed.
+
+        Parameters
+        ----------
+        evt : wx.aui.AUI_NB_TAB_MOVE
+            Event generated by moving the tab (not used)
+        """
+
+        # Get tab names in order
+        names = []
+        for i in range(self.GetPageCount()):
+            names.append(self.GetPageText(i))
+        # Reorder routines in experiment to match tab order
+        routines = collections.OrderedDict()
+        for name in names:
+            routines[name] = self.frame.exp.routines[name]
+        self.frame.exp.routines = routines
+        # Set modified
+        self.frame.setIsModified(True)
 
     def increaseSize(self, event=None):
         self.appData['routineSize'] = min(
@@ -1575,8 +1829,7 @@ class RoutinesNotebook(aui.AuiNotebook, ThemeMixin):
         """
         currPage = self.GetSelection()
         self.removePages()
-        displayOrder = sorted(self.frame.exp.routines.keys())  # alphabetical
-        for routineName in displayOrder:
+        for routineName in self.frame.exp.routines:
             if isinstance(self.frame.exp.routines[routineName], (Routine, BaseStandaloneRoutine)):
                 self.addRoutinePage(
                     routineName, self.frame.exp.routines[routineName])
@@ -1584,7 +1837,7 @@ class RoutinesNotebook(aui.AuiNotebook, ThemeMixin):
             self.SetSelection(currPage)
 
 
-class RoutineCanvas(wx.ScrolledWindow):
+class RoutineCanvas(wx.ScrolledWindow, handlers.ThemeMixin):
     """Represents a single routine (used as page in RoutinesNotebook)"""
 
     def __init__(self, notebook, id=wx.ID_ANY, routine=None):
@@ -1603,13 +1856,15 @@ class RoutineCanvas(wx.ScrolledWindow):
         self.curLine = []
         self.drawing = False
         self.drawSize = self.app.prefs.appData['routineSize']
+        # dict in which to store rectangles to aid layout (populated in updateLayoutRects)
+        self.rects = {}
         # auto-rescale based on number of components and window size is jumpy
         # when switch between routines of diff drawing sizes
         self.iconSize = (24, 24, 48)[self.drawSize]  # only 24, 48 so far
         self.fontBaseSize = (1100, 1200, 1300)[self.drawSize]  # depends on OS?
         #self.scroller = PsychopyScrollbar(self, wx.VERTICAL)
         self.SetVirtualSize((self.maxWidth, self.maxHeight))
-        self.SetScrollRate(self.dpi / 4, self.dpi / 4)
+        self.SetScrollRate(self.dpi // 16, self.dpi // 16)
 
         self.routine = routine
         self.yPositions = None
@@ -1631,20 +1886,26 @@ class RoutineCanvas(wx.ScrolledWindow):
         self.lastpos = (0, 0)
         # use the ID of the drawn icon to retrieve component name:
         self.componentFromID = {}
-        self.contextMenuItems = ['copy', 'edit', 'remove',
-                                 'move to top', 'move up',
-                                 'move down', 'move to bottom']
-        # labels are only for display, and allow localization
-        self.contextMenuLabels = {k: _localized[k]
-                                  for k in self.contextMenuItems}
+        # define context menu items and labels
+        self.contextMenuLabels = {
+            'copy': _translate("Copy"),
+            'paste above': _translate("Paste above"),
+            'paste below': _translate("Paste below"),
+            'edit': _translate("Edit"),
+            'remove': _translate("Remove"),
+            'move to top': _translate("Move to top"),
+            'move up': _translate("Move up"),
+            'move down': _translate("Move down"),
+            'move to bottom': _translate("Move to bottom"),
+        }
+        self.contextMenuItems = list(self.contextMenuLabels)
+
         self.contextItemFromID = {}
         self.contextIDFromItem = {}
         for item in self.contextMenuItems:
             id = wx.NewIdRef()
             self.contextItemFromID[id] = item
             self.contextIDFromItem[item] = id
-
-        self._applyAppTheme()
 
         self.Bind(wx.EVT_PAINT, self.OnPaint)
         self.Bind(wx.EVT_ERASE_BACKGROUND, lambda x: None)
@@ -1692,10 +1953,13 @@ class RoutineCanvas(wx.ScrolledWindow):
                 # width of components panel
                 menuPos[0] += self.frame.componentButtons.GetSize()[0]
                 # height of flow panel
-                menuPos[1] += self.frame.flowPanel.GetSize()[1]
+                menuPos[1] += self.frame.flowPanel.canvas.GetSize()[1]
             if len(icons):
                 self._menuComponent = self.componentFromID[icons[0]]
                 self.showContextMenu(self._menuComponent, xy=menuPos)
+            else:  # no context
+                self.showContextMenu(None, xy=menuPos)
+
         elif event.Dragging() or event.LeftUp():
             if self.dragid != -1:
                 pass
@@ -1706,23 +1970,58 @@ class RoutineCanvas(wx.ScrolledWindow):
                 x, y = self.ConvertEventCoords(event)
                 id = self.pdc.FindObjectsByBBox(x, y)[0]
                 component = self.componentFromID[id]
-                self.frame.SetStatusText("Component: "+component.params['name'].val)
+                # Indicate hover target in the bottom bar
+                if component == self.routine.settings:
+                    self.frame.SetStatusText("Routine settings: " + component.params['name'].val)
+                else:
+                    self.frame.SetStatusText("Component: "+component.params['name'].val)
             except IndexError:
                 self.frame.SetStatusText("")
 
     def OnScroll(self, event):
         xy = self.GetViewStart()
-        multiplier = self.dpi / 1600
-        self.Scroll(xy[0], xy[1] - event.WheelRotation*multiplier)
+        delta = int(event.WheelRotation * self.dpi / 1600)
+        self.Scroll(xy[0], xy[1]-delta)
 
     def showContextMenu(self, component, xy):
+        """Show a context menu in the routine view.
+        """
         menu = wx.Menu()
-        for item in self.contextMenuItems:
-            id = self.contextIDFromItem[item]
-            menu.Append(id, self.contextMenuLabels[item])
-            menu.Bind(wx.EVT_MENU, self.onContextSelect, id=id)
-        self.frame.PopupMenu(menu, xy)
-        menu.Destroy()  # destroy to avoid mem leak
+        if component not in (None, self.routine.settings):
+            for item in self.contextMenuItems:
+                id = self.contextIDFromItem[item]
+                # don't show paste option unless something is copied
+                if item.startswith('paste'):
+                    if not self.app.copiedCompon:  # skip paste options
+                        continue
+                    itemLabel = " ".join(
+                        (self.contextMenuLabels[item],
+                         "({})".format(
+                             self.app.copiedCompon.params['name'].val)))
+                elif any([item.startswith(op) for op in ('copy', 'remove', 'edit')]):
+                    itemLabel = " ".join(
+                        (self.contextMenuLabels[item],
+                         "({})".format(component.params['name'].val)))
+                else:
+                    itemLabel = self.contextMenuLabels[item]
+
+                menu.Append(id, itemLabel)
+                menu.Bind(wx.EVT_MENU, self.onContextSelect, id=id)
+
+            self.frame.PopupMenu(menu, xy)
+            menu.Destroy()  # destroy to avoid mem leak
+        else:
+            # anywhere but a hotspot is clicked, show this menu
+            if self.app.copiedCompon:
+                itemLabel = " ".join(
+                    (_translate('paste'),
+                     "({})".format(
+                         self.app.copiedCompon.params['name'].val)))
+                menu.Append(wx.ID_ANY, itemLabel)
+                menu.Bind(wx.EVT_MENU, self.pasteCompon, id=wx.ID_ANY)
+
+                self.frame.PopupMenu(menu, xy)
+                menu.Destroy()
 
     def onContextSelect(self, event):
         """Perform a given action on the component chosen
@@ -1734,10 +2033,14 @@ class RoutineCanvas(wx.ScrolledWindow):
             self.editComponentProperties(component=component)
         elif op == 'copy':
             self.copyCompon(component=component)
+        elif op == 'paste above':
+            self.pasteCompon(index=r.index(component))
+        elif op == 'paste below':
+            self.pasteCompon(index=r.index(component) + 1)
         elif op == 'remove':
             r.removeComponent(component)
             self.frame.addToUndoStack(
-                "REMOVE `%s` from Routine" % (component.params['name'].val))
+                "REMOVE `%s` from Routine" % component.params['name'].val)
             self.frame.exp.namespace.remove(component.params['name'].val)
         elif op.startswith('move'):
             lastLoc = r.index(component)
@@ -1778,21 +2081,20 @@ class RoutineCanvas(wx.ScrolledWindow):
         self.pdc.DrawToDCClipped(dc, r)
 
     def redrawRoutine(self):
-        self.pdc.Clear()  # clear the screen
-        self.pdc.RemoveAll()  # clear all objects (icon buttons)
-
-        self.SetBackgroundColour(ThemeMixin.appColors['tab_bg'])
-        # work out where the component names and icons should be from name
-        # lengths
+        # clear everything
+        self.pdc.Clear()
+        self.pdc.RemoveAll()
+        # set font size
         self.setFontSize(self.fontBaseSize // self.dpi, self.pdc)
-        longest = 0
-        w = 50
-        for comp in self.routine:
-            name = comp.params['name'].val
-            if len(name) > longest:
-                longest = len(name)
-                w = self.GetFullTextExtent(name)[0]
-        self.timeXpos = w + (50, 50, 90)[self.drawSize]
+
+        # update rects with which to layout
+        self.updateLayoutRects()
+        # # if debugging, draw all the rects
+        # self.pdc.SetPen(wx.Pen("Red"))
+        # for rect in self.rects.values():
+        #     self.pdc.DrawRectangle(rect)
+
+        self.SetBackgroundColour(colors.app['tab_bg'])
 
         # separate components according to whether they are drawn in separate
         # row
@@ -1801,12 +2103,17 @@ class RoutineCanvas(wx.ScrolledWindow):
         for n, component in enumerate(self.routine):
             if component.type == 'Static':
                 staticCompons.append(component)
+            elif component == self.routine.settings:
+                pass
             else:
                 rowComponents.append(component)
 
+        # draw settings button
+        settingsBtnExtent = self.drawSettingsBtn(self.pdc, self.routine.settings)
+
         # draw static, time grid, normal (row) comp:
-        yPos = self.yPosTop
-        yPosBottom = yPos + len(rowComponents) * self.componentStep
+        yPos = self.rects['grid'].Top
+        yPosBottom = self.rects['grid'].Bottom
         # draw any Static Components first (below the grid)
         for component in staticCompons:
             bottom = max(yPosBottom, self.GetSize()[1])
@@ -1816,11 +2123,120 @@ class RoutineCanvas(wx.ScrolledWindow):
         for component in rowComponents:
             self.drawComponent(self.pdc, component, yPos)
             yPos += self.componentStep
+        # draw end line (if there is one)
+        self.drawForceEndLine(self.pdc, yPosBottom)
 
         # the 50 allows space for labels below the time axis
-        self.SetVirtualSize((self.maxWidth, yPos + 50))
+        self.SetVirtualSize((int(self.maxWidth), yPos + 50))
         self.Refresh()  # refresh the visible window after drawing (OnPaint)
         #self.scroller.Resize()
+
+    def updateLayoutRects(self):
+        """
+        Recalculate the positions and sizes of the wx.Rect objects which determine
+        how the canvas is laid out.
+        """
+        self.rects = {}
+        self.setFontSize(self.fontBaseSize // self.dpi, self.pdc)
+
+        # --- Whole area ---
+        canvas = self.rects['canvas'] = wx.Rect(
+            x=15,
+            y=15,
+            width=self.sizePix[0] - 30,
+            height=self.sizePix[1] - 30
+        )
+
+        # --- Time grid ---
+        # filter Components for just those included in the time grid
+        trueComponents = []
+        for comp in self.routine:
+            if type(comp).__name__ in ("StaticComponent", "RoutineSettingsComponent"):
+                continue
+            else:
+                trueComponents.append(comp)
+        # note: will be modified as things are added around it
+        grid = self.rects['grid'] = wx.Rect(
+            x=canvas.Left,
+            y=canvas.Top,
+            width=canvas.Width,
+            height=self.componentStep * len(trueComponents)
+        )
+
+        # --- Top bar ---
+        # this is where the Settings button lives
+        topBar = self.rects['topBar'] = wx.Rect(
+            x=canvas.Left,
+            y=canvas.Top,
+            width=canvas.Width,
+            height=int(self.iconSize/3) + 24
+        )
+        # shift grid down
+        grid.Top += topBar.Height
+
+        # --- Time labels ---
+        # note: will be modified as things are added around it
+        timeLbls = self.rects['timeLbls'] = wx.Rect(
+            x=grid.Left,
+            y=topBar.Bottom,
+            width=grid.Width,
+            height=int(self.componentStep/2)
+        )
+        # shift grid down
+        grid.Top += timeLbls.Height
+
+        # --- Component names ---
+        # get width of component names column
+        compNameWidths = [120]
+        if not prefs.builder['abbreviateLongCompNames']:
+            # get width of longest name if we're not elipsizing
+            for comp in self.routine:
+                w = self.GetFullTextExtent(comp.name)[0] + 12
+                compNameWidths.append(w)
+        componentLabelWidth = max(compNameWidths)
+        # create rect
+        compLbls = self.rects['compLbls'] = wx.Rect(
+            x=canvas.Left,
+            y=grid.Top,
+            width=componentLabelWidth,
+            height=grid.Height
+        )
+        # shift grid and time labels right (and cut to size)
+        grid.Left += compLbls.Width
+        grid.Width -= compLbls.Width
+        timeLbls.Left += compLbls.Width
+        timeLbls.Width -= compLbls.Width
+
+        # --- Component icons ---
+        icons = self.rects['icons'] = wx.Rect(
+            x=compLbls.Right,
+            y=grid.Top,
+            width=self.iconSize + 12,
+            height=grid.Height
+        )
+        # shift grid and time labels right (and cut to size)
+        grid.Left += icons.Width + 12
+        grid.Width -= icons.Width + 12
+        timeLbls.Left += icons.Width + 12
+        timeLbls.Width -= icons.Width + 12
+
+        # --- Time units label ---
+        timeUnitsLbl = self.rects['timeUnitsLbl'] = wx.Rect(
+            x=grid.Right,
+            y=grid.Top,
+            width=self.GetFullTextExtent("t (sec)")[0] + 12,
+            height=int(self.componentStep/2)
+        )
+        # align self by right edge
+        timeUnitsLbl.Left -= timeUnitsLbl.Width
+        # shift grid and time labels left (and cut to size)
+        grid.Width -= timeUnitsLbl.Width
+        timeLbls.Width -= timeUnitsLbl.Width
+
+        # update references from rects
+        self.timeXposStart = grid.Left
+        self.timeXposEnd = grid.Right
+        self.iconXpos = self.rects['icons'].Left
 
     def getMaxTime(self):
         """Return the max time to be drawn in the window
@@ -1828,24 +2244,48 @@ class RoutineCanvas(wx.ScrolledWindow):
         maxTime, nonSlip = self.routine.getMaxTime()
         if self.routine.hasOnlyStaticComp():
             maxTime = int(maxTime) + 1.0
-        return maxTime
+
+        # if max came from routine settings, mark as hard stop
+        rtMax, rtMaxIsNum = self.routine.settings.getDuration()
+        hardStop = rtMaxIsNum and rtMax == maxTime
+        # handle no max
+        if maxTime is None:
+            maxTime = 10
+
+        return maxTime, hardStop
 
     def drawTimeGrid(self, dc, yPosTop, yPosBottom, labelAbove=True):
         """Draws the grid of lines and labels the time axes
         """
-        tMax = self.getMaxTime() * 1.1
+        yPosTop = int(yPosTop)  # explicit type conversion to `int`
+        yPosBottom = int(yPosBottom)
+
+        tMax, hardStop = self.getMaxTime()
+        tMax *= 1.1
         xScale = self.getSecsPerPixel()
         xSt = self.timeXposStart
         xEnd = self.timeXposEnd
 
         # dc.SetId(wx.NewIdRef())
-        dc.SetPen(wx.Pen(ThemeMixin.appColors['rt_timegrid']))
-        dc.SetTextForeground(wx.Colour(ThemeMixin.appColors['rt_timegrid']))
+        dc.SetPen(wx.Pen(colors.app['rt_timegrid']))
+        dc.SetTextForeground(wx.Colour(colors.app['rt_timegrid']))
+        self.setFontSize(self.fontBaseSize // self.dpi, dc)
+
+        id = wx.NewIdRef()
+        dc.SetId(id)
+
         # draw horizontal lines on top and bottom
-        dc.DrawLine(x1=xSt, y1=yPosTop,
-                    x2=xEnd, y2=yPosTop)
-        dc.DrawLine(x1=xSt, y1=yPosBottom,
-                    x2=xEnd, y2=yPosBottom)
+        dc.DrawLine(
+            x1=int(xSt),
+            y1=yPosTop,
+            x2=int(xEnd),
+            y2=yPosTop)
+        dc.DrawLine(
+            x1=int(xSt),
+            y1=yPosBottom,
+            x2=int(xEnd),
+            y2=yPosBottom)
+
         # draw vertical time points
         # gives roughly 1/10 the width, but in rounded to base 10 of
         # 0.1,1,10...
@@ -1858,28 +2298,61 @@ class RoutineCanvas(wx.ScrolledWindow):
             unitSize = 10 ** numpy.ceil(numpy.log10(tMax * 0.8)) / 20.0
         for lineN in range(int(numpy.floor((tMax / unitSize)))):
             # vertical line:
-            dc.DrawLine(xSt + lineN * unitSize / xScale, yPosTop - 4,
-                        xSt + lineN * unitSize / xScale, yPosBottom + 4)
+            dc.DrawLine(int(xSt + lineN * unitSize / xScale),
+                        yPosTop - 4,
+                        int(xSt + lineN * unitSize / xScale),
+                        yPosBottom + 4)
             # label above:
-            dc.DrawText('%.2g' % (lineN * unitSize), xSt + lineN *
-                        unitSize / xScale - 4, yPosTop - 30)
+            dc.DrawText('%.2g' % (lineN * unitSize),
+                        int(xSt + lineN * unitSize / xScale - 4),
+                        yPosTop - 30)
             if yPosBottom > 300:
                 # if bottom of grid is far away then draw labels here too
-                dc.DrawText('%.2g' % (lineN * unitSize), xSt + lineN *
-                            unitSize / xScale - 4, yPosBottom + 10)
+                dc.DrawText('%.2g' % (lineN * unitSize),
+                            int(xSt + lineN * unitSize / xScale - 4),
+                            yPosBottom + 10)
         # add a label
         self.setFontSize(self.fontBaseSize // self.dpi, dc)
         # y is y-half height of text
-        dc.DrawText('t (sec)', xEnd + 5,
-                    yPosTop - self.GetFullTextExtent('t')[1] / 2.0)
+        dc.DrawText('t (sec)',
+                    self.rects['timeUnitsLbl'].Left + 6,
+                    self.rects['timeUnitsLbl'].Top)
         # or draw bottom labels only if scrolling is turned on, virtual size >
         # available size?
         if yPosBottom > 300:
             # if bottom of grid is far away then draw labels there too
             # y is y-half height of text
-            dc.DrawText('t (sec)', xEnd + 5,
-                        yPosBottom - self.GetFullTextExtent('t')[1] / 2.0)
-        dc.SetTextForeground(ThemeMixin.appColors['text'])
+            dc.DrawText('t (sec)',
+                        int(xEnd + 5),
+                        yPosBottom - self.GetFullTextExtent('t')[1] // 2)
+        dc.SetTextForeground(colors.app['text'])
+
+    def drawForceEndLine(self, dc, yPosBottom):
+        id = wx.NewIdRef()
+        dc.SetId(id)
+        # get max time & check if we have a hard stop
+        tMax, hardStop = self.getMaxTime()
+        # if routine has an estimated stop, it's not a hard stop but we shold draw the line anyway
+        if self.routine.settings.params.get("durationEstim", False):
+            hardStop = True
+
+        if hardStop:
+            # if hard stop, draw orange final line
+            dc.SetPen(
+                wx.Pen(colors.app['rt_comp_force'], width=4)
+            )
+            dc.SetTextForeground(
+                wx.Colour(colors.app['rt_comp_force'])
+            )
+            # vertical line:
+            dc.DrawLine(self.timeXposEnd,
+                        self.rects['grid'].Top - 4,
+                        self.timeXposEnd,
+                        yPosBottom + 4)
+            # label above:
+            dc.DrawText('%.2g' % tMax,
+                        int(self.timeXposEnd - 4),
+                        self.rects['grid'].Top - 30)
 
     def setFontSize(self, size, dc):
         font = self.GetFont()
@@ -1889,6 +2362,11 @@ class RoutineCanvas(wx.ScrolledWindow):
 
     def drawStatic(self, dc, component, yPosTop, yPosBottom):
         """draw a static (ISI) component box"""
+
+        # type conversion to `int`
+        yPosTop = int(yPosTop)
+        yPosBottom = int(yPosBottom)
+
         # set an id for the region of this component (so it can
         # act as a button). see if we created this already.
         id = None
@@ -1913,12 +2391,12 @@ class RoutineCanvas(wx.ScrolledWindow):
         xScale = self.getSecsPerPixel()
 
         if component.params['disabled'].val:
-            dc.SetBrush(wx.Brush(ThemeMixin.appColors['rt_static_disabled']))
-            dc.SetPen(wx.Pen(ThemeMixin.appColors['rt_static_disabled']))
+            dc.SetBrush(wx.Brush(colors.app['rt_static_disabled']))
+            dc.SetPen(wx.Pen(colors.app['rt_static_disabled']))
 
         else:
-            dc.SetBrush(wx.Brush(ThemeMixin.appColors['rt_static']))
-            dc.SetPen(wx.Pen(ThemeMixin.appColors['rt_static']))
+            dc.SetBrush(wx.Brush(colors.app['rt_static']))
+            dc.SetPen(wx.Pen(colors.app['rt_static']))
 
         xSt = self.timeXposStart + startTime // xScale
         w = duration // xScale + 1  # +1 b/c border alpha=0 in dc.SetPen
@@ -1934,18 +2412,22 @@ class RoutineCanvas(wx.ScrolledWindow):
         x = xSt + w // 2
         staticLabelTop = (0, 50, 60)[self.drawSize]
         y = staticLabelTop - nameH * 3
-        fullRect = wx.Rect(x - 20, y, nameW, nameH)
+        fullRect = wx.Rect(int(x - 20), int(y), int(nameW), int(nameH))
         # draw the rectangle, draw text on top:
-        dc.DrawRectangle(xSt, yPosTop - nameH * 4, w, h + nameH * 5)
-        dc.DrawText(name, x - nameW // 2, y)
+        dc.DrawRectangle(
+            int(xSt), int(yPosTop - nameH * 4), int(w), int(h + nameH * 5))
+        dc.DrawText(name, int(x - nameW // 2), y)
         # update bounds to include time bar
-        fullRect.Union(wx.Rect(xSt, yPosTop, w, h))
+        fullRect.Union(wx.Rect(int(xSt), int(yPosTop), int(w), int(h)))
         dc.SetIdBounds(id, fullRect)
 
     def drawComponent(self, dc, component, yPos):
         """Draw the timing of one component on the timeline"""
         # set an id for the region of this component (so it
         # can act as a button). see if we created this already
+
+        yPos = int(yPos)  # explicit type conversion
+
         id = None
         for key in self.componentFromID:
             if self.componentFromID[key] == component:
@@ -1956,96 +2438,179 @@ class RoutineCanvas(wx.ScrolledWindow):
         dc.SetId(id)
 
         iconYOffset = (6, 6, 0)[self.drawSize]
-        icons = self.app.iconCache
+        # get default icon and bar color
+        thisIcon = icons.ComponentIcon(component, size=self.iconSize).bitmap
+        thisColor = colors.app['rt_comp']
+        thisStyle = wx.BRUSHSTYLE_SOLID
 
-        thisIcon = icons.getComponentBitmap(component, self.iconSize)
-        dc.DrawBitmap(thisIcon, self.iconXpos, yPos + iconYOffset, True)
-        fullRect = wx.Rect(self.iconXpos, yPos,
-                           thisIcon.GetWidth(), thisIcon.GetHeight())
+        # check True/False on ForceEndRoutine
+        if 'forceEndRoutine' in component.params:
+            if component.params['forceEndRoutine'].val:
+                thisColor = colors.app['rt_comp_force']
+        # check True/False on ForceEndRoutineOnPress
+        if 'forceEndRoutineOnPress' in component.params:
+            if component.params['forceEndRoutineOnPress'].val in ['any click', 'correct click', 'valid click']:
+                thisColor = colors.app['rt_comp_force']
+        # check True aliases on EndRoutineOn
+        if 'endRoutineOn' in component.params:
+            if component.params['endRoutineOn'].val in ['look at', 'look away']:
+                thisColor = colors.app['rt_comp_force']
+        # grey bar if comp is disabled
+        if component.params['disabled'].val:
+            thisIcon = thisIcon.ConvertToDisabled()
+            thisColor = colors.app['rt_comp_disabled']
+
+        dc.DrawBitmap(thisIcon, int(self.iconXpos) + 6, int(yPos + iconYOffset), True)
+        fullRect = wx.Rect(
+            int(self.iconXpos),
+            yPos,
+            thisIcon.GetWidth(),
+            thisIcon.GetHeight())
 
         self.setFontSize(self.fontBaseSize // self.dpi, dc)
 
         name = component.params['name'].val
+        # elipsize name if it's too long
+        if self.GetFullTextExtent(name)[0] > self.rects['compLbls'].Width:
+            name = name[:6] + "..." + name[-6:]
         # get size based on text
-        w, h = self.GetFullTextExtent(name)[0:2]
-        if w > self.iconXpos - self.dpi/5:
-            # If width is greater than space available, split word at point calculated by average letter width
-            maxLen = int(
-                (self.iconXpos - self.GetFullTextExtent("...")[0] - self.dpi/5)
-                / (w/len(name))
-            )
-            splitAt = int(maxLen/2)
-            name = name[:splitAt] + "..." + name[-splitAt:]
-            w = self.iconXpos - self.dpi/5
+        w = self.rects['compLbls'].Width
+        h = self.GetFullTextExtent(name)[1]
+
         # draw text
         # + x position of icon (left side)
         # - half width of icon (including whitespace around it)
         # - FULL width of text
         # + slight adjustment for whitespace
-        x = self.iconXpos - thisIcon.GetWidth()/2 - w + thisIcon.GetWidth()/3
+        x = self.rects['compLbls'].Right - 6 - self.GetFullTextExtent(name)[0]
         _adjust = (5, 5, -2)[self.drawSize]
         y = yPos + thisIcon.GetHeight() // 2 - h // 2 + _adjust
-        dc.DrawText(name, x, y)
-        fullRect.Union(wx.Rect(x - 20, y, w, h))
+        dc.DrawText(name, int(x), y)
+        fullRect.Union(
+            wx.Rect(int(x - 20), int(y), int(w), int(h)))
 
         # deduce start and stop times if possible
         startTime, duration, nonSlipSafe = component.getStartAndDuration()
         # draw entries on timeline (if they have some time definition)
-        if startTime is not None and duration is not None:
-            # then we can draw a sensible time bar!
-            dc.SetPen(wx.Pen(ThemeMixin.appColors['rt_comp'],
-                             style=wx.TRANSPARENT))
-
-            if component.params['disabled'].val:
-                # Grey bar if comp is disabled
-                dc.SetBrush(wx.Brush(ThemeMixin.appColors['rt_comp_disabled']))
-                dc.DrawBitmap(thisIcon.ConvertToDisabled(), self.iconXpos, yPos + iconYOffset, True)
-            elif any(key in component.params for key in ['forceEndRoutine', 'forceEndRoutineOnPress', 'endRoutineOn']):
-                # if component has force end params, check them and set bar as orange or blue accordingly
-                col = ThemeMixin.appColors['rt_comp']
-                # check True/False on ForceEndRoutine
-                if 'forceEndRoutine' in component.params:
-                    if component.params['forceEndRoutine'].val:
-                        col = ThemeMixin.appColors['rt_comp_force']
-                # check True/False on ForceEndRoutineOnPress
-                if 'forceEndRoutineOnPress' in component.params:
-                    if component.params['forceEndRoutineOnPress'].val:
-                        col = ThemeMixin.appColors['rt_comp_force']
-                # check True aliases on EndRoutineOn
-                if 'endRoutineOn' in component.params:
-                    if component.params['endRoutineOn'].val in ['look at', 'look away']:
-                        col = ThemeMixin.appColors['rt_comp_force']
-                dc.SetBrush(wx.Brush(col))
-                dc.DrawBitmap(thisIcon, self.iconXpos, yPos + iconYOffset, True)
-            else:
-                # Blue bar otherwise
-                dc.SetBrush(wx.Brush(ThemeMixin.appColors['rt_comp']))
-                dc.DrawBitmap(thisIcon, self.iconXpos, yPos + iconYOffset, True)
-
-            xScale = self.getSecsPerPixel()
+        if duration is not None:
             yOffset = (3.5, 3.5, 0.5)[self.drawSize]
             h = self.componentStep // (4, 3.25, 2.5)[self.drawSize]
-            xSt = self.timeXposStart + startTime // xScale
-            w = duration // xScale + 1
-            if w > 10000:
-                w = 10000  # limit width to 10000 pixels!
-            if w < 2:
-                w = 2  # make sure at least one pixel shows
-            dc.DrawRectangle(xSt, y + yOffset, w, h)
-            # update bounds to include time bar
-            fullRect.Union(wx.Rect(xSt, y + yOffset, w, h))
+            xScale = self.getSecsPerPixel()
+            # then we can draw a sensible time bar!
+            thisPen = wx.Pen(thisColor, style=wx.TRANSPARENT)
+            thisBrush = wx.Brush(thisColor, style=thisStyle)
+            dc.SetPen(thisPen)
+            dc.SetBrush(thisBrush)
+            # cap duration if routine has a max
+            maxDur, useMax = self.routine.settings.getDuration()
+            overspill = 0
+            if useMax:
+                if maxDur is None:
+                    maxDur = duration
+                overspill = max(duration - maxDur, 0)
+                duration = min(maxDur, duration)
+            # If there's a fixed end time and no start time, start 20px before 0
+            if ('stopType' in component.params) and ('startType' in component.params) and (
+                    component.params['stopType'].val in ('time (s)', 'duration (s)')
+                    and component.params['startType'].val in ('time (s)')
+                    and startTime is None
+            ):
+                startTime = -20 * self.getSecsPerPixel()
+                duration += 20 * self.getSecsPerPixel()
+                # thisBrush.SetStyle(wx.BRUSHSTYLE_BDIAGONAL_HATCH)
+                # dc.SetBrush(thisBrush)
+
+            if startTime is not None:
+                xSt = self.timeXposStart + startTime // xScale
+                w = duration // xScale + 1
+                if w > 10000:
+                    w = 10000  # limit width to 10000 pixels!
+                if w < 2:
+                    w = 2  # make sure at least one pixel shows
+                dc.DrawRectangle(int(xSt), int(y + yOffset), int(w), int(h))
+                # update bounds to include time bar
+                fullRect.Union(wx.Rect(int(xSt), int(y + yOffset), int(w), int(h)))
+            # draw greyed out bar for any overspill (if routine has a max dur)
+            if useMax and overspill > 0:
+                # use disabled color
+                dc.SetBrush(
+                    wx.Brush(colors.app['rt_comp_disabled'], style=thisStyle)
+                )
+                dc.SetPen(
+                    wx.Pen(colors.app['rt_comp_disabled'], style=wx.TRANSPARENT)
+                )
+                # draw rest of bar
+                w = overspill // xScale + 1
+                if w > 10000:
+                    w = 10000  # limit width to 10000 pixels!
+                if w < 2:
+                    w = 2  # make sure at least one pixel shows
+                dc.DrawRectangle(self.timeXposEnd, int(y + yOffset), int(w), int(h))
         dc.SetIdBounds(id, fullRect)
+
+    def drawSettingsBtn(self, dc, component):
+        # Setup ID
+        id = None
+        for key in self.componentFromID:
+            if self.componentFromID[key] == component:
+                id = key
+        if not id:  # then create one and add to the dict
+            id = wx.NewIdRef()
+            self.componentFromID[id] = component
+        dc.SetId(id)
+        # Get settings icon
+        sz = int(self.iconSize/3)
+        thisIcon = icons.ComponentIcon(component, size=sz).bitmap
+        # Some parameters
+        lbl = _translate("Routine settings")
+        padding = 12
+        # Set font
+        fontSize = wx.SystemSettings.GetFont(wx.SYS_DEFAULT_GUI_FONT).GetPointSize()
+        self.setFontSize(fontSize, dc)
+        # Calculate extent
+        extent = wx.Rect(
+            x=self.rects['topBar'].Left,
+            y=self.rects['topBar'].Top,
+            width=padding + sz + 6 + self.GetTextExtent(lbl)[0] + padding,
+            height=padding + sz + padding
+        )
+        extent = extent.CenterIn(self.rects['topBar'], dir=wx.VERTICAL)
+        # Get content rect
+        rect = wx.Rect(extent.TopLeft, extent.BottomRight)
+        rect.Deflate(padding)
+        # Draw rect
+        dc.SetPen(wx.Pen(colors.app['panel_bg']))
+        dc.SetBrush(wx.Brush(colors.app['tab_bg']))
+        dc.DrawRoundedRectangle(extent, 6)
+        # Draw button
+        dc.SetTextForeground(
+            wx.Colour(colors.app['text'])
+        )
+        dc.DrawLabel(
+            lbl,
+            image=thisIcon,
+            rect=rect,
+            alignment=wx.ALIGN_LEFT | wx.ALIGN_CENTER_VERTICAL
+        )
+        # Bind to ID bounds
+        dc.SetIdBounds(id, extent)
+
+        return extent
 
     def copyCompon(self, event=None, component=None):
         """This is easy - just take a copy of the component into memory
         """
-        self.app.copiedCompon = copy.deepcopy(component)
+        self.app.copiedCompon = component.copy()
 
-    def pasteCompon(self, event=None, component=None):
-        if not self.app.copiedCompon:
-            return -1  # not possible to paste if nothing copied
+    def pasteCompon(self, event=None, component=None, index=None):
+        # Alias None for component stored in app
+        if component is None and self.app.copiedCompon:
+            component = self.app.copiedCompon
+        # Fail if nothing copied
+        if component is None:
+            return -1
         exp = self.frame.exp
-        origName = self.app.copiedCompon.params['name'].val
+        origName = component.params['name'].val
         defaultName = exp.namespace.makeValid(origName)
         msg = _translate('New name for copy of "%(copied)s"?  [%(default)s]')
         vals = {'copied': origName, 'default': defaultName}
@@ -2053,22 +2618,29 @@ class RoutineCanvas(wx.ScrolledWindow):
         dlg = wx.TextEntryDialog(self, message=message,
                                  caption=_translate('Paste Component'))
         if dlg.ShowModal() == wx.ID_OK:
+            # Get new name
             newName = dlg.GetValue()
-            newCompon = copy.deepcopy(self.app.copiedCompon)
             if not newName:
                 newName = defaultName
             newName = exp.namespace.makeValid(newName)
-            newCompon.params['name'].val = newName
-            if 'name' in dir(newCompon):
-                newCompon.name = newName
-            self.routine.addComponent(newCompon)
+            # Create copy of component with new references
+            newCompon = component.copy(
+                exp=exp,
+                parentName=self.routine.name,
+                name=newName
+            )
+            # Add to routine
+            if index is None:
+                self.routine.addComponent(newCompon)
+            else:
+                self.routine.insertComponent(index, newCompon)
             self.frame.exp.namespace.user.append(newName)
             # could do redrawRoutines but would be slower?
             self.redrawRoutine()
             self.frame.addToUndoStack("PASTE Component `%s`" % newName)
         dlg.Destroy()
 
-    def editComponentProperties(self, event=None, component=None):
+    def editComponentProperties(self, event=None, component=None, openToPage=None):
         # we got here from a wx.button press (rather than our own drawn icons)
         if event:
             componentName = event.EventObject.GetName()
@@ -2098,7 +2670,8 @@ class RoutineCanvas(wx.ScrolledWindow):
             _Dlg = DlgComponentProperties
         dlg = _Dlg(frame=self.frame,
                    element=component,
-                   experiment=self.frame.exp, editing=True)
+                   experiment=self.frame.exp, editing=True,
+                   openToPage=openToPage)
         if dlg.OK:
             # Redraw if force end routine has changed
             if any(key in component.params for key in ['forceEndRoutine', 'forceEndRoutineOnPress', 'endRoutineOn']):
@@ -2108,14 +2681,20 @@ class RoutineCanvas(wx.ScrolledWindow):
                 if initialForce != newForce:
                     self.redrawRoutine()  # need to refresh timings section
                     self.Refresh()  # then redraw visible
-                    self.frame.flowPanel.draw()
-            # Redraw if timings have changed
-            if component.getStartAndDuration() != initialTimings:
+                    self.frame.flowPanel.canvas.draw()
+            # Redraw if timings have changed (or always, if comp was RoutineSettings)
+            if (
+                component.getStartAndDuration() != initialTimings
+                or component.type == "RoutineSettingsComponent"
+            ):
                 self.redrawRoutine()  # need to refresh timings section
                 self.Refresh()  # then redraw visible
-                self.frame.flowPanel.draw()
+                self.frame.flowPanel.canvas.draw()
                 # self.frame.flowPanel.Refresh()
-            elif component.params['name'].val != old_name:
+            elif component.name != old_name:
+                if component == self.routine.settings:
+                    self.frame.flowPanel.canvas.draw()
+                    self.frame._doRenameRoutine(oldName=old_name, newName=component.name)
                 self.redrawRoutine()  # need to refresh name
             elif component.params['disabled'].val != old_disabled:
                 self.redrawRoutine()  # need to refresh color
@@ -2126,10 +2705,10 @@ class RoutineCanvas(wx.ScrolledWindow):
 
     def getSecsPerPixel(self):
         pixels = float(self.timeXposEnd - self.timeXposStart)
-        return self.getMaxTime() / pixels
+        return self.getMaxTime()[0] / pixels
 
 
-class StandaloneRoutineCanvas(scrolledpanel.ScrolledPanel, ThemeMixin):
+class StandaloneRoutineCanvas(scrolledpanel.ScrolledPanel):
     def __init__(self, parent, routine=None):
         # Init super
         scrolledpanel.ScrolledPanel.__init__(
@@ -2140,6 +2719,7 @@ class StandaloneRoutineCanvas(scrolledpanel.ScrolledPanel, ThemeMixin):
         self.app = self.frame.app
         self.dpi = self.app.dpi
         self.routine = routine
+        self.helpUrl = self.routine.url
         self.params = routine.params
         # Setup sizer
         self.sizer = wx.BoxSizer(wx.VERTICAL)
@@ -2147,17 +2727,26 @@ class StandaloneRoutineCanvas(scrolledpanel.ScrolledPanel, ThemeMixin):
         # Setup categ notebook
         self.ctrls = ParamNotebook(self, experiment=self.frame.exp, element=routine)
         self.paramCtrls = self.ctrls.paramCtrls
-        self.sizer.Add(self.ctrls, border=12, proportion=1, flag=wx.ALIGN_CENTER | wx.ALL)
+        self.sizer.Add(self.ctrls, border=12, proportion=1, flag=wx.ALIGN_CENTER | wx.TOP)
         # Make buttons
         self.btnsSizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.helpBtn = utils.HoverButton(self, id=wx.ID_HELP, label=_translate("Help"))
+        self.helpBtn.Bind(wx.EVT_BUTTON, self.onHelp)
+        self.btnsSizer.Add(self.helpBtn, border=6, flag=wx.ALL | wx.EXPAND)
+        self.btnsSizer.AddStretchSpacer(1)
         # Add validator stuff
         self.warnings = WarningManager(self)
         self.sizer.Add(self.warnings.output, border=3, flag=wx.EXPAND | wx.ALL)
         # Add buttons to sizer
-        self.sizer.Add(self.btnsSizer, border=6, proportion=0, flag=wx.ALIGN_RIGHT | wx.ALL)
+        self.sizer.Add(self.btnsSizer, border=3, proportion=0, flag=wx.EXPAND | wx.ALL)
         # Style
-        self._applyAppTheme()
         self.SetupScrolling(scroll_y=True)
+
+    def _applyAppTheme(self):
+        self.SetBackgroundColour(colors.app['tab_bg'])
+        self.helpBtn._applyAppTheme()
+        self.Refresh()
+        self.Update()
 
     def updateExperiment(self, evt=None):
         """Update this routine's saved parameters to what is currently entered"""
@@ -2170,16 +2759,26 @@ class StandaloneRoutineCanvas(scrolledpanel.ScrolledPanel, ThemeMixin):
                 # Update the routine dict keys to use the current name for this routine
                 self.frame.exp.routines[self.routine.params['name'].val] = self.frame.exp.routines.pop(name)
         # Redraw the flow panel
-        self.frame.flowPanel.draw()
+        self.frame.flowPanel.canvas.draw()
+        # Rename this page
+        page = self.frame.routinePanel.GetPageIndex(self)
+        self.frame.routinePanel.SetPageText(page, self.routine.params['name'].val)
+        # Update save button
+        self.frame.setIsModified(True)
+
+    def onHelp(self, event=None):
+        """Uses self.app.followLink() to self.helpUrl
+        """
+        self.app.followLink(url=self.helpUrl)
 
     def Validate(self, *args, **kwargs):
         return self.ctrls.Validate()
 
 
-class ComponentsPanel(scrolledpanel.ScrolledPanel):
+class ComponentsPanel(scrolledpanel.ScrolledPanel, handlers.ThemeMixin):
     """Panel containing buttons for each component, sorted by category"""
 
-    class CategoryButton(wx.ToggleButton):
+    class CategoryButton(wx.ToggleButton, handlers.ThemeMixin, HoverMixin):
         """Button to show/hide a category of components"""
         def __init__(self, parent, name, cat):
             if sys.platform == 'darwin':
@@ -2205,8 +2804,7 @@ class ComponentsPanel(scrolledpanel.ScrolledPanel):
             # Bind toggle function
             self.Bind(wx.EVT_TOGGLEBUTTON, self.ToggleMenu)
             # Bind hover functions
-            self.Bind(wx.EVT_ENTER_WINDOW, self.hoverOn)
-            self.Bind(wx.EVT_LEAVE_WINDOW, self.hoverOff)
+            self.SetupHover()
 
         def ToggleMenu(self, event):
             # If triggered manually with a bool, treat that as a substitute for event selection
@@ -2214,83 +2812,38 @@ class ComponentsPanel(scrolledpanel.ScrolledPanel):
                 state = event
             else:
                 state = event.GetSelection()
+            # Set state
             self.SetValue(state)
-            if state:
-                # If state is show, then show all non-hidden components
-                for btn in self.menu.GetChildren():
-                    btn = btn.GetWindow()
-                    if isinstance(btn, ComponentsPanel.ComponentButton):
-                        comp = btn.component
-                    elif isinstance(btn, ComponentsPanel.RoutineButton):
-                        comp = btn.routine
-                    else:
-                        return
-                    # Work out if it should be shown based on filter
-                    cond = True
-                    if self.parent.filter == 'Any':
-                        cond = True
-                    elif self.parent.filter == 'Both':
-                        cond = 'PsychoJS' in comp.targets and 'PsychoPy' in comp.targets
-                    elif self.parent.filter in ['PsychoPy', 'PsychoJS']:
-                        cond = self.parent.filter in comp.targets
-                    # Always hide if hidden by prefs
-                    if comp.__name__ in prefs.builder['hiddenComponents'] + [
-                        'SettingsComponent', 'UnknownComponent', 'UnknownRoutine'
-                    ]:
-                        cond = False
-                    btn.Show(cond)
-                # # Update icon
-                # self.icon.SetLabelText(chr(int("1401", 16)))
-            else:
-                # If state is hide, hide all components
-                self.menu.ShowItems(False)
-                # # Update icon
-                # self.icon.SetLabelText(chr(int("140A", 16)))
-            # Do layout
-            self.parent.Layout()
-            self.parent.SetupScrolling()
+            # Refresh view (which will show/hide according to this button's state)
+            self.parent.refreshView()
             # Restyle
-            self._applyAppTheme()
-
-        def hoverOn(self, event):
-            """Apply hover effect"""
-            self.hover = True
-            self._applyAppTheme()
-
-        def hoverOff(self, event):
-            """Unapply hover effect"""
-            self.hover = False
-            self._applyAppTheme()
+            self.OnHover()
 
         def _applyAppTheme(self):
             """Apply app theme to this button"""
-            if self.hover:
-                # If hovered over currently, use hover colours
-                self.SetForegroundColour(ThemeMixin.appColors['txtbutton_fg_hover'])
-                # self.icon.SetForegroundColour(ThemeMixin.appColors['txtbutton_fg_hover'])
-                self.SetBackgroundColour(ThemeMixin.appColors['txtbutton_bg_hover'])
-            else:
-                # Otherwise, use regular colours
-                self.SetForegroundColour(ThemeMixin.appColors['text'])
-                # self.icon.SetForegroundColour(ThemeMixin.appColors['text'])
-                self.SetBackgroundColour(ThemeMixin.appColors['frame_bg'])
+            self.OnHover()
 
-    class ComponentButton(wx.Button):
+    class ComponentButton(wx.Button, handlers.ThemeMixin):
         """Button to open component parameters dialog"""
         def __init__(self, parent, name, comp, cat):
             self.parent = parent
             self.component = comp
             self.category = cat
-            iconCache = parent.app.iconCache
-            # Get a shorter, title case version of component name
+            # construct label
             label = name
-            for redundant in ['component', 'Component', "ButtonBox"]:
+            # remove "Component" from the end
+            for redundant in ['component', 'Component']:
                 label = label.replace(redundant, "")
-            label = prettyname(label, wrap=10)
+            # convert to title case
+            label = st.CaseSwitcher.pascal2title(label)
+            # wrap
+            label = st.wrap(label, 10)
+
             # Make button
             wx.Button.__init__(self, parent, wx.ID_ANY,
                                label=label, name=name,
-                               size=(68, 68+12*label.count("\n")), style=wx.NO_BORDER)
+                               size=(68, 68+12*label.count("\n")),
+                               style=wx.NO_BORDER)
             self.SetToolTip(wx.ToolTip(comp.tooltip or name))
             # Style
             self._applyAppTheme()
@@ -2298,11 +2851,35 @@ class ComponentsPanel(scrolledpanel.ScrolledPanel):
             self.Bind(wx.EVT_BUTTON, self.onClick)
             self.Bind(wx.EVT_RIGHT_DOWN, self.onRightClick)
 
+        @property
+        def element(self):
+            return self.component
+
         def onClick(self, evt=None, timeout=None):
+            """Called when a component button is clicked on.
+            """
             routine = self.parent.frame.routinePanel.getCurrentRoutine()
+            if routine is None:
+                if timeout is not None:  # just return, we're testing the UI
+                    return
+                # Show a message telling the user there is no routine in the
+                # experiment, making adding a component pointless until they do
+                # so.
+                dlg = wx.MessageDialog(
+                    self,
+                    _translate(
+                        "Cannot add component, experiment has no routines."),
+                    _translate("Error"),
+                    wx.OK | wx.ICON_ERROR | wx.CENTRE)
+                dlg.ShowModal()
+                dlg.Destroy()
+                return
+
             page = self.parent.frame.routinePanel.getCurrentPage()
-            comp = self.component(parentName=routine.name, exp=self.parent.frame.exp)
-            name = comp.params['name'].val
+            comp = self.component(
+                parentName=routine.name,
+                exp=self.parent.frame.exp)
+
             # does this component have a help page?
             if hasattr(comp, 'url'):
                 helpUrl = comp.url
@@ -2322,7 +2899,8 @@ class ComponentsPanel(scrolledpanel.ScrolledPanel):
                 # Add to the actual routine
                 routine.addComponent(comp)
                 namespace = self.parent.frame.exp.namespace
-                name = comp.params['name'].val = namespace.makeValid(name)
+                desiredName = comp.params['name'].val
+                name = comp.params['name'].val = namespace.makeValid(desiredName)
                 namespace.add(name)
                 # update the routine's view with the new component too
                 page.redrawRoutine()
@@ -2335,17 +2913,19 @@ class ComponentsPanel(scrolledpanel.ScrolledPanel):
             Defines rightclick behavior within builder view's
             components panel
             """
+            # Get fave levels
+            faveLevels = prefs.appDataCfg['builder']['favComponents']
             # Make menu
             menu = wx.Menu()
-            if self.component.__name__ in self.parent.favorites:
+            if faveLevels[self.component.__name__] > ComponentsPanel.faveThreshold:
                 # If is in favs
-                msg = "Remove from favorites"
+                msg = _translate("Remove from favorites")
                 fun = self.removeFromFavorites
             else:
                 # If is not in favs
-                msg = "Add to favorites"
+                msg = _translate("Add to favorites")
                 fun = self.addToFavorites
-            btn = menu.Append(wx.ID_ANY, _localized[msg])
+            btn = menu.Append(wx.ID_ANY, msg)
             menu.Bind(wx.EVT_MENU, fun, btn)
             # Show as popup
             self.PopupMenu(menu, evt.GetPosition())
@@ -2360,11 +2940,14 @@ class ComponentsPanel(scrolledpanel.ScrolledPanel):
 
         def _applyAppTheme(self):
             # Set colors
-            self.SetForegroundColour(ThemeMixin.appColors['text'])
-            self.SetBackgroundColour(ThemeMixin.appColors['panel_bg'])
+            self.SetForegroundColour(colors.app['text'])
+            self.SetBackgroundColour(colors.app['panel_bg'])
             # Set bitmap
-            iconCache = self.parent.app.iconCache
-            icon = iconCache.getBitmap(self.component.iconFile, size=48)
+            icon = icons.ComponentIcon(self.component, size=48)
+            if hasattr(self.component, "beta") and self.component.beta:
+                icon = icon.beta
+            else:
+                icon = icon.bitmap
             self.SetBitmap(icon)
             self.SetBitmapCurrent(icon)
             self.SetBitmapPressed(icon)
@@ -2373,22 +2956,26 @@ class ComponentsPanel(scrolledpanel.ScrolledPanel):
             # Refresh
             self.Refresh()
 
-    class RoutineButton(wx.Button):
+    class RoutineButton(wx.Button, handlers.ThemeMixin):
         """Button to open component parameters dialog"""
         def __init__(self, parent, name, rt, cat):
             self.parent = parent
             self.routine = rt
             self.category = cat
-            iconCache = parent.app.iconCache
-            # Get a shorter, title case version of routine name
+            # construct label
             label = name
+            # remove "Routine" from the end
             for redundant in ['routine', 'Routine', "ButtonBox"]:
                 label = label.replace(redundant, "")
-            label = prettyname(label, wrap=10)
+            # convert to title case
+            label = st.CaseSwitcher.pascal2title(label)
+            # wrap
+            label = st.wrap(label, 10)
             # Make button
             wx.Button.__init__(self, parent, wx.ID_ANY,
                                label=label, name=name,
-                               size=(68, 68+12*label.count("\n")), style=wx.NO_BORDER)
+                               size=(68, 68+12*label.count("\n")),
+                               style=wx.NO_BORDER)
             self.SetToolTip(wx.ToolTip(rt.tooltip or name))
             # Style
             self._applyAppTheme()
@@ -2396,13 +2983,18 @@ class ComponentsPanel(scrolledpanel.ScrolledPanel):
             self.Bind(wx.EVT_BUTTON, self.onClick)
             self.Bind(wx.EVT_RIGHT_DOWN, self.onRightClick)
 
+        @property
+        def element(self):
+            return self.routine
+
         def onClick(self, evt=None, timeout=None):
             # Make a routine instance
             comp = self.routine(exp=self.parent.frame.exp)
             # Add to the actual routine
             exp = self.parent.frame.exp
             namespace = exp.namespace
-            name = comp.params['name'].val = namespace.makeValid(comp.params['name'].val)
+            name = comp.params['name'].val = namespace.makeValid(
+                comp.params['name'].val)
             namespace.add(name)
             exp.addStandaloneRoutine(name, comp)
             # update the routine's view with the new routine too
@@ -2428,11 +3020,14 @@ class ComponentsPanel(scrolledpanel.ScrolledPanel):
 
         def _applyAppTheme(self):
             # Set colors
-            self.SetForegroundColour(ThemeMixin.appColors['text'])
-            self.SetBackgroundColour(ThemeMixin.appColors['panel_bg'])
+            self.SetForegroundColour(colors.app['text'])
+            self.SetBackgroundColour(colors.app['panel_bg'])
             # Set bitmap
-            iconCache = self.parent.app.iconCache
-            icon = iconCache.getBitmap(self.routine.iconFile, size=48)
+            icon = icons.ComponentIcon(self.routine, size=48)
+            if hasattr(self.routine, "beta") and self.routine.beta:
+                icon = icon.beta
+            else:
+                icon = icon.bitmap
             self.SetBitmap(icon)
             self.SetBitmapCurrent(icon)
             self.SetBitmapPressed(icon)
@@ -2440,6 +3035,48 @@ class ComponentsPanel(scrolledpanel.ScrolledPanel):
             self.SetBitmapPosition(wx.TOP)
             # Refresh
             self.Refresh()
+
+    class FilterDialog(wx.Dialog, handlers.ThemeMixin):
+        def __init__(self, parent, size=(200, 300)):
+            wx.Dialog.__init__(self, parent, size=size)
+            self.parent = parent
+            # Setup sizer
+            self.border = wx.BoxSizer(wx.VERTICAL)
+            self.SetSizer(self.border)
+            self.sizer = wx.BoxSizer(wx.VERTICAL)
+            self.border.Add(self.sizer, border=6, proportion=1, flag=wx.ALL | wx.EXPAND)
+            # Label
+            self.label = wx.StaticText(self, label="Show components which \nwork with...")
+            self.sizer.Add(self.label, border=6, flag=wx.ALL | wx.EXPAND)
+            # Control
+            self.viewCtrl = ToggleButtonArray(self,
+                                              labels=("PsychoPy (local)", "PsychoJS (online)", "Both", "Any"),
+                                              values=("PsychoPy", "PsychoJS", "Both", "Any"),
+                                              multi=False, ori=wx.VERTICAL)
+            self.viewCtrl.Bind(wx.EVT_CHOICE, self.onChange)
+            self.sizer.Add(self.viewCtrl, border=6, flag=wx.ALL | wx.EXPAND)
+            self.viewCtrl.SetValue(prefs.builder['componentFilter'])
+            # OK
+            self.OKbtn = wx.Button(self, id=wx.ID_OK, label=_translate("OK"))
+            self.SetAffirmativeId(wx.ID_OK)
+            self.border.Add(self.OKbtn, border=6, flag=wx.ALL | wx.ALIGN_RIGHT)
+
+            self.Layout()
+            self._applyAppTheme()
+
+        def _applyAppTheme(self):
+            self.SetBackgroundColour(colors.app['panel_bg'])
+            self.label.SetForegroundColour(colors.app['text'])
+
+        def GetValue(self):
+            return self.viewCtrl.GetValue()
+
+        def onChange(self, evt=None):
+            self.parent.filter = prefs.builder['componentFilter'] = self.GetValue()
+            prefs.saveUserPrefs()
+            self.parent.refreshView()
+
+    faveThreshold = 20
 
     def __init__(self, frame, id=-1):
         """A panel that displays available components.
@@ -2459,126 +3096,232 @@ class ComponentsPanel(scrolledpanel.ScrolledPanel):
         # Setup sizer
         self.sizer = wx.BoxSizer(wx.VERTICAL)
         self.SetSizer(self.sizer)
-        # Get components
-        self.components = experiment.getAllComponents(
-            self.app.prefs.builder['componentsFolders'])
-        del self.components['SettingsComponent']
-        self.routines = experiment.getAllStandaloneRoutines()
-        # Get categories
-        self.categories = getAllCategories()
-        for name, rt in self.routines.items():
-            for cat in rt.categories:
-                if cat not in self.categories:
-                    self.categories.append(cat)
-        # Get favorites
-        self.faveThreshold = 20
-        self.faveLevels = self.prefs.appDataCfg['builder']['favComponents']
-        self.favorites = []
-        for comp in self.components:
-            # Add component to fave levels with a score of 0 if it's not already present
-            if comp not in self.faveLevels:
-                self.faveLevels[comp] = 0
-            # Mark as a favorite if it exceeds a threshold
-            if self.faveLevels[comp] > self.faveThreshold:
-                self.favorites.append(comp)
-        # Fill in gaps in favorites with defaults
-        faveDefaults = ['ImageComponent', 'KeyboardComponent', 'SoundComponent',
-                        'TextComponent', 'MouseComponent', 'SliderComponent']
-        while len(self.favorites) < 6:
-            thisDef = faveDefaults.pop(0)
-            if thisDef not in self.favorites:
-                self.favorites.append(thisDef)
-        # Make a sizer and label for each category
-        self.catSizers = {cat: wx.WrapSizer(orient=wx.HORIZONTAL) for cat in self.categories}
-        self.catLabels = {cat: self.CategoryButton(self, name=str(cat), cat=str(cat)) for cat in self.categories}
-        for cat in self.categories:
-            self.sizer.Add(self.catLabels[cat], border=3, flag=wx.BOTTOM | wx.EXPAND)
-            self.sizer.Add(self.catSizers[cat], border=6, flag=wx.ALL | wx.ALIGN_CENTER)
-        # Make a button for each component
+        # Top bar
+        self.topBarSizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.sizer.Add(self.topBarSizer, border=0, flag=wx.ALL | wx.EXPAND)
+        # Add plugins button
+        self.pluginBtn = wx.Button(self, label=_translate("Get more..."), style=wx.BU_EXACTFIT | wx.BORDER_NONE)
+        self.pluginBtn.SetToolTip(_translate("Add new components and features via plugins."))
+        self.topBarSizer.Add(self.pluginBtn, border=3, flag=wx.ALL)
+        self.pluginBtn.Bind(wx.EVT_BUTTON, self.onPluginBtn)
+        # Add filter button
+        self.topBarSizer.AddStretchSpacer(1)
+        self.filterBtn = wx.Button(self, style=wx.BU_EXACTFIT | wx.BORDER_NONE)
+        self.filterBtn.SetToolTip(_translate("Filter components by whether they work with PsychoJS, PsychoPy or both."))
+        self.topBarSizer.Add(self.filterBtn, border=3, flag=wx.ALL)
+        self.filterBtn.Bind(wx.EVT_BUTTON, self.onFilterBtn)
+
+        # Attributes to store handles in
+        self.catLabels = {}
+        self.catSizers = {}
         self.compButtons = []
-        for name, comp in self.components.items():
-            for cat in comp.categories:  # make one button for each category
-                self.compButtons.append(
-                    self.ComponentButton(self, name, comp, cat)
-                )
-            if name in self.favorites:
-                self.compButtons.append(
-                    self.ComponentButton(self, name, comp, "Favorites")
-                )
-        # Add component buttons to category sizers
-        for btn in self.compButtons:
-            self.catSizers[btn.category].Add(btn, border=3, flag=wx.ALL)
-        # Make a button for each routine
         self.rtButtons = []
-        for name, rt in self.routines.items():
-            for cat in rt.categories:  # make one button for each category
-                self.rtButtons.append(
-                    self.RoutineButton(self, name, rt, cat)
-                )
-            if name in self.favorites:
-                self.rtButtons.append(
-                    self.RoutineButton(self, name, rt, "Favorites")
-                )
-        # Add component buttons to category sizers
-        for btn in self.rtButtons:
-            self.catSizers[btn.category].Add(btn, border=3, flag=wx.ALL)
-        # Set starting visibility
-        for cat, btn in self.catLabels.items():
-            if cat in ['Favorites']:
-                btn.ToggleMenu(True)
-            else:
-                btn.ToggleMenu(False)
+        self.objectHandles = {}
+        # Create buttons
+        self.populate()
+        # Apply filter
+        self.refreshView()
         # Do sizing
-        self.Layout()
         self.Fit()
-        self.SetupScrolling()
         # double buffered better rendering except if retina
         self.SetDoubleBuffered(not self.frame.isRetina)
-        # Apply theme
-        self._applyAppTheme()  # bitmaps only just loaded
+
+    def getSortedElements(self):
+        allElements = getAllElements()
+        if "SettingsComponent" in allElements:
+            del allElements['SettingsComponent']
+
+        # Create array to store elements in
+        elements = OrderedDict()
+        # Specify which categories are fixed to start/end
+        firstCats = ['Favorites', 'Stimuli', 'Responses', 'Custom']
+        lastCats = ['I/O', 'Other']
+        # Add categories which are fixed to start
+        for cat in firstCats:
+            elements[cat] = {}
+        # Add unfixed categories
+        for cat in getAllCategories():
+            if cat not in lastCats + firstCats:
+                elements[cat] = {}
+        # Add categories which are fixed to end
+        for cat in lastCats:
+            elements[cat] = {}
+        # Get elements and sort by category
+        for name, emt in allElements.items():
+            for cat in emt.categories:
+                if cat in elements:
+                    elements[cat][name] = emt
+        # Assign favorites
+        self.faveLevels = prefs.appDataCfg['builder']['favComponents']
+        for name, emt in allElements.items():
+            # Make sure element has a level
+            if name not in self.faveLevels:
+                self.faveLevels[name] = 0
+            # If it exceeds the threshold, add to favorites
+            if self.faveLevels[name] > self.faveThreshold:
+                elements['Favorites'][name] = emt
+        # Fill in gaps in favorites with defaults
+        faveDefaults = [
+            ('ImageComponent', allElements['ImageComponent']),
+            ('KeyboardComponent', allElements['KeyboardComponent']),
+            ('SoundComponent', allElements['SoundComponent']),
+            ('TextComponent', allElements['TextComponent']),
+            ('MouseComponent', allElements['MouseComponent']),
+            ('SliderComponent', allElements['SliderComponent']),
+        ]
+        while len(elements['Favorites']) < 6:
+            name, emt = faveDefaults.pop(0)
+            if name not in elements['Favorites']:
+                elements['Favorites'][name] = emt
+                self.faveLevels[name] = self.faveThreshold + 1
+
+        return elements
+
+    def populate(self):
+        """
+        Find all component/standalone routine classes and create buttons for each, sorted by category.
+
+        This *can* be called multiple times - already existing buttons are simply detached from their sizer and
+        reattached in the correct place given any changes since last called.
+        """
+        elements = self.getSortedElements()
+
+        # Detach any extant category labels and sizers from main sizer
+        for cat in self.objectHandles:
+            self.sizer.Detach(self.catLabels[cat])
+            self.sizer.Detach(self.catSizers[cat])
+        # Add each category
+        for cat, emts in elements.items():
+            if cat not in self.objectHandles:
+                # Make category sizer
+                self.catSizers[cat] = wx.WrapSizer(orient=wx.HORIZONTAL)
+                # Make category button
+                self.catLabels[cat] = self.CategoryButton(self, name=_translate(cat), cat=cat)
+                # Store category reference
+                self.objectHandles[cat] = {}
+            # Add to sizer
+            self.sizer.Add(self.catLabels[cat], border=3, flag=wx.BOTTOM | wx.EXPAND)
+            self.sizer.Add(self.catSizers[cat], border=6, flag=wx.ALL | wx.ALIGN_CENTER)
+
+            # Detach any extant buttons from sizer
+            for btn in self.objectHandles[cat].values():
+                self.catSizers[cat].Detach(btn)
+            # Add each element
+            for name, emt in emts.items():
+                if name not in self.objectHandles[cat]:
+                    # Make appropriate button
+                    if issubclass(emt, BaseStandaloneRoutine):
+                        emtBtn = self.RoutineButton(self, name=name, rt=emt, cat=cat)
+                        self.rtButtons.append(emtBtn)
+                    else:
+                        emtBtn = self.ComponentButton(self, name=name, comp=emt, cat=cat)
+                        self.compButtons.append(emtBtn)
+                        # If we're in standalone routine view, disable new component button
+                        rtPage = self.frame.routinePanel.getCurrentPage()
+                        if rtPage:
+                            emtBtn.Enable(
+                                not isinstance(rtPage.routine, BaseStandaloneRoutine)
+                            )
+                    # Store reference by category
+                    self.objectHandles[cat][name] = emtBtn
+                # Add to category sizer
+                self.catSizers[cat].Add(self.objectHandles[cat][name], border=3, flag=wx.ALL)
+
+        # Show favourites on startup
+        self.catLabels['Favorites'].ToggleMenu(True)
+
+    def refreshView(self):
+        # Get view value(s)
+        if prefs.builder['componentFilter'] == "Both":
+            view = ["PsychoPy", "PsychoJS"]
+        elif prefs.builder['componentFilter'] == "Any":
+            view = []
+        else:
+            view = [prefs.builder['componentFilter']]
+
+        # Iterate through categories and buttons
+        for cat in self.objectHandles:
+            anyShown = False
+            for name, btn in self.objectHandles[cat].items():
+                shown = True
+                # Get element button refers to
+                if isinstance(btn, self.ComponentButton):
+                    emt = btn.component
+                elif isinstance(btn, self.RoutineButton):
+                    emt = btn.routine
+                else:
+                    emt = None
+                # Check whether button is hidden by filter
+                for v in view:
+                    if v not in btn.element.targets:
+                        shown = False
+                # Check whether button is hidden by prefs
+                if name in prefs.builder['hiddenComponents'] + alwaysHidden:
+                    shown = False
+                # check whether comp/rt indicates itsef as hidden
+                if emt.hidden:
+                    shown = False
+                # Check whether button refers to a future comp/rt
+                if hasattr(emt, "version"):
+                    ver = parseVersionSafely(emt.version)
+                    if ver > psychopyVersion:
+                        shown = False
+                # Show/hide button
+                btn.Show(shown)
+                # Count state towards category
+                anyShown = anyShown or shown
+            # Only show category button if there are some buttons
+            self.catLabels[cat].Show(anyShown)
+            # If comp button is set to hide, hide all regardless
+            if not self.catLabels[cat].GetValue():
+                self.catSizers[cat].ShowItems(False)
+
+        # Do sizing
+        self.Layout()
+        self.SetupScrolling(scrollToTop=False)
 
     def _applyAppTheme(self, target=None):
-        cs = ThemeMixin.appColors
         # Style component panel
-        self.SetForegroundColour(cs['text'])
-        self.SetBackgroundColour(cs['panel_bg'])
-        # Style component buttons
-        for btn in self.compButtons:
-            btn._applyAppTheme()
+        self.SetForegroundColour(colors.app['text'])
+        self.SetBackgroundColour(colors.app['panel_bg'])
         # Style category labels
         for lbl in self.catLabels:
-            self.catLabels[lbl].SetForegroundColour(cs['text'])
-            # then apply to all children as well
-        for c in self.GetChildren():
-            if hasattr(c, '_applyAppTheme'):
-                # if the object understands themes then request that
-                c._applyAppTheme()
+            self.catLabels[lbl].SetForegroundColour(colors.app['text'])
+        # Style filter button
+        self.filterBtn.SetBackgroundColour(colors.app['panel_bg'])
+        icon = icons.ButtonIcon("filter", size=16).bitmap
+        self.filterBtn.SetBitmap(icon)
+        self.filterBtn.SetBitmapCurrent(icon)
+        self.filterBtn.SetBitmapPressed(icon)
+        self.filterBtn.SetBitmapFocus(icon)
+        # Style plugin button
+        self.pluginBtn.SetBackgroundColour(colors.app['panel_bg'])
+        self.pluginBtn.SetForegroundColour(colors.app['text'])
+        icon = icons.ButtonIcon("plus", size=16).bitmap
+        self.pluginBtn.SetBitmap(icon)
+        self.pluginBtn.SetBitmapCurrent(icon)
+        self.pluginBtn.SetBitmapPressed(icon)
+        self.pluginBtn.SetBitmapFocus(icon)
+
         self.Refresh()
-        self.Update()
 
     def addToFavorites(self, comp):
         name = comp.__name__
         # Mark component as a favorite
         self.faveLevels[name] = self.faveThreshold + 1
-        self.favorites.append(name)
-        # Add button to favorites menu
-        btn = self.ComponentButton(self, name, comp, "Favorites")
-        self.compButtons.append(btn)
-        self.catSizers['Favorites'].Add(btn, border=3, flag=wx.ALL)
+        # Repopulate
+        self.populate()
         # Do sizing
         self.Layout()
 
     def removeFromFavorites(self, button):
         comp = button.component
         name = comp.__name__
-        # Skip if component isn't in favorites
-        if name not in self.favorites:
-            return
         # Unmark component as favorite
         self.faveLevels[name] = 0
-        self.favorites.remove(name)
         # Remove button from favorites menu
-        button.Hide()
+        button.Destroy()
+        del self.objectHandles["Favorites"][name]
         # Do sizing
         self.Layout()
 
@@ -2587,21 +3330,38 @@ class ComponentsPanel(scrolledpanel.ScrolledPanel):
             button.Enable(enable)
         self.Update()
 
+    def onFilterBtn(self, evt=None):
+        dlg = self.FilterDialog(self)
+        dlg.ShowModal()
 
-class ReadmeFrame(wx.Frame):
+    def onPluginBtn(self, evt=None):
+        dlg = psychopy.app.plugin_manager.dialog.EnvironmentManagerDlg(self)
+        dlg.Show()
+        # Do post-close checks
+        dlg.onClose()
+
+
+class ReadmeFrame(wx.Frame, handlers.ThemeMixin):
     """Defines construction of the Readme Frame"""
 
-    def __init__(self, parent):
+    def __init__(self, parent, filename=None):
         """
         A frame for presenting/loading/saving readme files
         """
         self.parent = parent
-        title = "%s readme" % (parent.exp.name)
+        try:
+            title = "%s readme" % (parent.exp.name)
+        except AttributeError:
+            title = "readme"
         self._fileLastModTime = None
         pos = wx.Point(parent.Position[0] + 80, parent.Position[1] + 80)
         _style = wx.DEFAULT_FRAME_STYLE | wx.FRAME_FLOAT_ON_PARENT
         wx.Frame.__init__(self, parent, title=title,
                           size=(600, 500), pos=pos, style=_style)
+        # Setup sizer
+        self.sizer = wx.BoxSizer()
+        self.SetSizer(self.sizer)
+
         self.Bind(wx.EVT_CLOSE, self.onClose)
         self.Hide()
         # create icon
@@ -2611,13 +3371,20 @@ class ReadmeFrame(wx.Frame):
             iconFile = os.path.join(parent.paths['resources'], 'coder.ico')
             if os.path.isfile(iconFile):
                 self.SetIcon(wx.Icon(iconFile, wx.BITMAP_TYPE_ICO))
-        self.makeMenus()
-        self.rawText = ""
-        self.ctrl = HtmlWindow(self, wx.ID_ANY)
-        self.ctrl.Bind(wx.html.EVT_HTML_LINK_CLICKED, self.onUrl)
+        self.ctrl = utils.MarkdownCtrl(self, file=filename, style=wx.BOTTOM)
+        self.sizer.Add(self.ctrl, border=6, proportion=1, flag=wx.ALL | wx.EXPAND)
 
-    def onUrl(self, evt=None):
-        webbrowser.open(evt.LinkInfo.Href)
+    def show(self, value=True):
+        self.Show(value)
+        if value:
+            self._applyAppTheme()
+
+    def _applyAppTheme(self):
+        from psychopy.app.themes import fonts
+        self.SetBackgroundColour(fonts.coderTheme.base.backColor)
+        self.ctrl.SetBackgroundColour(fonts.coderTheme.base.backColor)
+        self.Update()
+        self.Refresh()
 
     def onClose(self, evt=None):
         """
@@ -2650,14 +3417,17 @@ class ReadmeFrame(wx.Frame):
 
     def setFile(self, filename):
         """Sets the readme file found with current builder experiment"""
-        self.filename = filename
+        self.filename = self.ctrl.file = filename
         self.expName = self.parent.exp.getExpName()
+        if not self.expName:
+            self.expName = "untitled"
         # check we can read
         if filename is None:  # check if we can write to the directory
             return False
-        elif not os.path.exists(filename):
-            with open(filename, "w") as f:
-                f.write("")
+        # Path-ise file
+        filename = Path(filename)
+        if not filename.is_file():
+            filename.write_text("")
             self.filename = filename
             return False
         elif not os.access(filename, os.R_OK):
@@ -2683,13 +3453,8 @@ class ReadmeFrame(wx.Frame):
             return False
         f.close()
         self._fileLastModTime = os.path.getmtime(filename)
-        self.rawText = readmeText
-        if md:
-            renderedText = md.MarkdownIt().render(readmeText)
-        else:
-            renderedText = readmeText.replace("\n", "<br>")
-        self.ctrl.SetPage(renderedText)
-        self.SetTitle("%s readme (%s)" % (self.expName, filename))
+        self.ctrl.setValue(readmeText)
+        self.SetTitle("readme (%s)" % self.expName)
 
     def refresh(self, evt=None):
         if hasattr(self, 'filename'):
@@ -2722,74 +3487,56 @@ class ReadmeFrame(wx.Frame):
             self.Show()
 
 
-class ExportFileDialog(wx.Dialog):
-    def __init__(self, parent, ID, title, size=wx.DefaultSize,
-                 pos=wx.DefaultPosition, style=wx.DEFAULT_DIALOG_STYLE,
-                 filePath=None, exp=None):
-        wx.Dialog.__init__(self, parent, ID, title,
-                           size=size, pos=pos, style=style)
-        # Now continue with the normal construction of the dialog
-        # contents
-        self.exp = exp
-        sizer = wx.BoxSizer(wx.VERTICAL)
-        box = wx.BoxSizer(wx.HORIZONTAL)
-
-        label = wx.StaticText(self, wx.ID_ANY, _translate("Filepath:"))
-        box.Add(label, 0, wx.ALIGN_CENTRE | wx.ALL, 5)
-        if len(filePath) > 70:
-            filePath = filePath[:20] + "....." + filePath[-40:]
-        self.filePath = wx.StaticText(self, wx.ID_ANY, filePath, size=(500, -1))
-        box.Add(self.filePath, 1, wx.ALIGN_CENTRE | wx.ALL, 5)
-
-        sizer.Add(box, 0, wx.GROW | wx.ALL, 5)
-
-        # Set save on export HTML choice
-        box = wx.BoxSizer(wx.HORIZONTAL)
-        choices = ['on Save', 'on Sync', 'manually']
-        exportLabel = _translate("Select 'manually' to receive this alert when exporting HTML.\n"
-                                 "Click 'OK' to export HTML, or click 'Cancel' to return.")
-        self.exportOnSave = wx.Choice(self, wx.ID_ANY,
-                                      size=wx.DefaultSize,
-                                      choices=choices)
-        self.exportOnSave.SetSelection(choices.index(self.exp.settings.params['exportHTML']))
-        self.exportText = wx.StaticText(self, wx.ID_ANY, exportLabel)
-        self.exportOnSave.SetHelpText(exportLabel)
-        box.Add(self.exportOnSave, .5, wx.ALIGN_CENTRE | wx.ALL, 5)
-        box.Add(self.exportText, 1, wx.ALIGN_CENTRE | wx.ALL, 5)
-
-        sizer.Add(box, 0, wx.GROW | wx.ALL, 5)
-
-        line = wx.StaticLine(self, wx.ID_ANY, size=(20, -1),
-                             style=wx.LI_HORIZONTAL)
-        sizer.Add(line, 0,
-                  wx.GROW | wx.RIGHT | wx.TOP, 5)
-
-        btnsizer = wx.StdDialogButtonSizer()
-
-        btn = wx.Button(self, wx.ID_OK)
-        btn.SetHelpText("The OK button completes the dialog")
-        btn.SetDefault()
-        btnsizer.AddButton(btn)
-
-        btn = wx.Button(self, wx.ID_CANCEL)
-        btn.SetHelpText("The Cancel button cancels the dialog. (Crazy, huh?)")
-        btnsizer.AddButton(btn)
-
-        sizer.Add(btnsizer, 0, wx.ALL, 5)
-
-        self.SetSizerAndFit(sizer)
-
-
-class FlowPanel(wx.ScrolledWindow):
-
+class FlowPanel(wx.Panel, handlers.ThemeMixin):
     def __init__(self, frame, id=-1):
+        wx.Panel.__init__(self, parent=frame)
+        # setup sizer
+        self.sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.SetSizer(self.sizer)
+        # buttons panel
+        self.btnPanel = ThemedPanel(self)
+        self.btnPanel.sizer = wx.BoxSizer(wx.VERTICAL)
+        self.btnPanel.SetSizer(self.btnPanel.sizer)
+        self.sizer.Add(self.btnPanel, border=6, flag=wx.EXPAND | wx.ALL)
+        # canvas
+        self.canvas = FlowCanvas(parent=self, frame=frame)
+        self.sizer.Add(self.canvas, border=0, proportion=1, flag=wx.EXPAND | wx.ALL)
+        # add routine button
+        self.btnInsertRoutine = self.canvas.btnInsertRoutine = HoverButton(
+            self.btnPanel, -1, _translate('Insert Routine'), size=(120, 50),
+            style=wx.BORDER_NONE
+        )
+        self.btnInsertRoutine.Bind(wx.EVT_BUTTON, self.canvas.onInsertRoutine)
+        self.btnPanel.sizer.Add(self.btnInsertRoutine, border=6, flag=wx.EXPAND | wx.ALL)
+        # add loop button
+        self.btnInsertLoop = self.canvas.btnInsertLoop = HoverButton(
+            self.btnPanel, -1, _translate('Insert Loop'), size=(120, 50),
+            style=wx.BORDER_NONE
+        )
+        self.btnInsertLoop.Bind(wx.EVT_BUTTON, self.canvas.setLoopPoint1)
+        self.btnPanel.sizer.Add(self.btnInsertLoop, border=6, flag=wx.EXPAND | wx.ALL)
+        # align buttons to top
+        self.btnPanel.sizer.AddStretchSpacer(1)
+
+        self.Layout()
+
+    def _applyAppTheme(self):
+        self.SetBackgroundColour(colors.app['panel_bg'])
+        self.btnPanel.SetBackgroundColour(colors.app['panel_bg'])
+
+        self.Refresh()
+
+
+class FlowCanvas(wx.ScrolledWindow, handlers.ThemeMixin):
+
+    def __init__(self, parent, frame, id=-1):
         """A panel that shows how the routines will fit together
         """
         self.frame = frame
+        self.parent = parent
         self.app = frame.app
         self.dpi = self.app.dpi
-        wx.ScrolledWindow.__init__(self, frame, id, (0, 0),
-                                   size=wx.Size(8 * self.dpi, 3 * self.dpi),
+        wx.ScrolledWindow.__init__(self, parent, id,
                                    style=wx.HSCROLL | wx.VSCROLL | wx.BORDER_NONE)
         self.needUpdate = True
         self.maxWidth = 50 * self.dpi
@@ -2804,11 +3551,11 @@ class FlowPanel(wx.ScrolledWindow):
         self.appData = self.app.prefs.appData
 
         # self.SetAutoLayout(True)
-        self.SetScrollRate(self.dpi / 4, self.dpi / 4)
+        self.SetScrollRate(self.dpi // 16, self.dpi // 16)
 
         # create a PseudoDC to record our drawing
         self.pdc = PseudoDC()
-        if parse_version(wx.__version__) < parse_version('4.0.0a1'):
+        if Version(wx.__version__) < Version('4.0.0a1'):
             self.pdc.DrawRoundedRectangle = self.pdc.DrawRoundedRectangleRect
         self.pen_cache = {}
         self.brush_cache = {}
@@ -2839,20 +3586,6 @@ class FlowPanel(wx.ScrolledWindow):
         # self.btnInsertRoutine = wx.Button(self,-1,
         #                                  'Insert Routine', pos=(10,10))
         # self.btnInsertLoop = wx.Button(self,-1,'Insert Loop', pos=(10,30))
-        labelRoutine = _translate('Insert Routine ')
-        labelLoop = _translate('Insert Loop     ')
-        btnHeight = 50
-        # Create add routine button
-        self.btnInsertRoutine = PsychopyPlateBtn(
-            self, -1, labelRoutine, pos=(10, 10), size=(120, btnHeight),
-            style=platebtn.PB_STYLE_SQUARE
-        )
-        # Create add loop button
-        self.btnInsertLoop = PsychopyPlateBtn(
-            self, -1, labelLoop, pos=(10, btnHeight+20),
-            size=(120, btnHeight),
-            style=platebtn.PB_STYLE_SQUARE
-        )  # spaces give size for CANCEL
 
         # use self.appData['flowSize'] to index a tuple to get a specific
         # value, eg: (4,6,8)[self.appData['flowSize']]
@@ -2860,8 +3593,7 @@ class FlowPanel(wx.ScrolledWindow):
 
         # bind events
         self.Bind(wx.EVT_MOUSE_EVENTS, self.OnMouse)
-        self.Bind(wx.EVT_BUTTON, self.onInsertRoutine, self.btnInsertRoutine)
-        self.Bind(wx.EVT_BUTTON, self.setLoopPoint1, self.btnInsertLoop)
+        self.Bind(wx.EVT_MOUSEWHEEL, self.OnScroll)
         self.Bind(wx.EVT_PAINT, self.OnPaint)
 
         idClear = wx.NewIdRef()
@@ -2874,20 +3606,10 @@ class FlowPanel(wx.ScrolledWindow):
         # double buffered better rendering except if retina
         self.SetDoubleBuffered(not self.frame.isRetina)
 
-        self._applyAppTheme()
-
     def _applyAppTheme(self, target=None):
         """Apply any changes which have been made to the theme since panel was last loaded"""
-        cs = ThemeMixin.appColors
-        # Style loop/routine buttons
-        self.btnInsertLoop.SetBackgroundColour(cs['frame_bg'])
-        self.btnInsertLoop.SetForegroundColour(cs['text'])
-        self.btnInsertLoop.Update()
-        self.btnInsertRoutine.SetBackgroundColour(cs['frame_bg'])
-        self.btnInsertRoutine.SetForegroundColour(cs['text'])
-        self.btnInsertRoutine.Update()
         # Set background
-        self.SetBackgroundColour(cs['panel_bg'])
+        self.SetBackgroundColour(colors.app['panel_bg'])
 
         self.draw()
 
@@ -2954,9 +3676,7 @@ class FlowPanel(wx.ScrolledWindow):
                 item.Enable(limitProgress < routine.limit or routine in flow)
             self.routinesFromID[id] = name
             menu.Bind(wx.EVT_MENU, self.onInsertRoutineSelect, id=id)
-        btnPos = self.btnInsertRoutine.GetRect()
-        menuPos = (btnPos[0], btnPos[1] + btnPos[3])
-        self.PopupMenu(menu, menuPos)
+        self.PopupMenu(menu)
         menu.Bind(wx.EVT_MENU_CLOSE, self.clearMode)
         menu.Destroy()  # destroy to avoid mem leak
 
@@ -2964,7 +3684,7 @@ class FlowPanel(wx.ScrolledWindow):
         """selecting (new) is a short-cut for:
         make new routine, insert it into the flow
         """
-        newRoutine = self.frame.routinePanel.createNewRoutine(returnName=True)
+        newRoutine = self.frame.routinePanel.createNewRoutine()
         if newRoutine:
             self.routinesFromID[event.GetId()] = newRoutine
             self.onInsertRoutineSelect(event)
@@ -2997,6 +3717,8 @@ class FlowPanel(wx.ScrolledWindow):
         self.frame.addToUndoStack("ADD Routine `%s`" % rtn.name)
         # reset flow drawing (remove entry point)
         self.clearMode()
+        # enable/disable add loop button
+        self.btnInsertLoop.Enable(bool(len(self.frame.exp.flow)))
 
     def setLoopPoint1(self, evt=None):
         """Someone pushed the insert loop button.
@@ -3137,13 +3859,26 @@ class FlowPanel(wx.ScrolledWindow):
                 self.frame.routinePanel.setCurrentRoutine(comp)
                 try:
                     self._menuComponentID = icon
-                    xy = wx.Point(event.X + self.GetPosition()[0],
-                                  event.Y + self.GetPosition()[1])
+                    xy = wx.Point(event.X + self.parent.GetPosition()[0],
+                                  event.Y + self.parent.GetPosition()[1])
                     self.showContextMenu(self._menuComponentID, xy=xy)
                 except UnboundLocalError:
                     # right click but not on an icon
                     # might as well do something
                     self.Refresh()
+            elif event.Moving():
+                icons = self.pdc.FindObjectsByBBox(x, y)
+                if not icons:
+                    self.frame.SetStatusText("")
+                for thisIcon in icons:
+                    # might intersect several and only one has a callback
+                    if thisIcon in self.componentFromID:
+                        comp = self.componentFromID[thisIcon]
+                        # indicate hover target in bottom bar
+                        if comp.getType() in handlerTypes:
+                            self.frame.SetStatusText(f"Loop ({comp.getType()}): {comp.name}")
+                        else:
+                            self.frame.SetStatusText(f"{comp.getType()}: {comp.name}")
         elif self.mode == 'routine':
             if event.LeftDown():
                 pt = self.entryPointPosList[0]
@@ -3164,6 +3899,16 @@ class FlowPanel(wx.ScrolledWindow):
                 point = self.getNearestGapPoint(mouseX=x,
                                                 exclude=self.gapsExcluded)
                 self.drawEntryPoints([self.entryPointPosList[0], point])
+
+    def OnScroll(self, evt):
+        xy = self.GetViewStart()
+        delta = int(evt.WheelRotation * self.dpi / 1600)
+        if evt.GetWheelAxis() == wx.MOUSE_WHEEL_VERTICAL:
+            # scroll vertically
+            self.Scroll(xy[0], xy[1] - delta)
+        if evt.GetWheelAxis() == wx.MOUSE_WHEEL_HORIZONTAL:
+            # scroll horizontally
+            self.Scroll(xy[0] + delta, xy[1])
 
     def getNearestGapPoint(self, mouseX, exclude=()):
         """Get gap that is nearest to a particular mouse location
@@ -3283,6 +4028,8 @@ class FlowPanel(wx.ScrolledWindow):
         # perform the actual removal
         flow.removeComponent(component, id=compID)
         self.draw()
+        # enable/disable add loop button
+        self.btnInsertLoop.Enable(bool(len(flow)))
 
     def OnPaint(self, event):
         # Create a buffered paint DC.  It will create the real
@@ -3329,8 +4076,8 @@ class FlowPanel(wx.ScrolledWindow):
         font = self.GetFont()
 
         # draw the main time line
-        self.linePos = (2.5 * self.dpi, 0.5 * self.dpi)  # x,y of start
-        gap = self.dpi / (6, 4, 2)[self.appData['flowSize']]
+        self.linePos = (1 * self.dpi, 0.5 * self.dpi)  # x,y of start
+        gap = self.dpi // (6, 4, 2)[self.appData['flowSize']]
         dLoopToBaseLine = (15, 25, 43)[self.appData['flowSize']]
         dBetweenLoops = (20, 24, 30)[self.appData['flowSize']]
 
@@ -3343,19 +4090,26 @@ class FlowPanel(wx.ScrolledWindow):
                 nLoops += 1
         sizeX = nRoutines * self.dpi * 2
         sizeY = nLoops * dBetweenLoops + dLoopToBaseLine * 3
-        self.SetVirtualSize(size=(sizeX, sizeY))
+        self.SetVirtualSize(size=(int(sizeX), int(sizeY)))
+
+        # this has type `float` for values, needs to be `int`
+        linePosX, linePosY = [int(x) for x in self.linePos]
 
         # step through components in flow, get spacing from text size, etc
-        currX = self.linePos[0]
+        currX = self.linePos[0]  # float
         lineId = wx.NewIdRef()
-        pdc.SetPen(wx.Pen(colour=cs['fl_flowline_bg']))
-        pdc.DrawLine(x1=self.linePos[0] - gap, y1=self.linePos[1],
-                     x2=self.linePos[0], y2=self.linePos[1])
+        pdc.SetPen(wx.Pen(colour=colors.app['fl_flowline_bg']))
+        pdc.DrawLine(
+            x1=linePosX - gap,
+            y1=linePosY,
+            x2=linePosX,
+            y2=linePosY)
+
         # NB the loop is itself the key, value is further info about it
         self.loops = {}
         nestLevel = 0
         maxNestLevel = 0
-        self.gapMidPoints = [currX - gap / 2]
+        self.gapMidPoints = [currX - gap // 2]
         self.gapNestLevels = [0]
         for ii, entry in enumerate(expFlow):
             if entry.getType() == 'LoopInitiator':
@@ -3371,17 +4125,24 @@ class FlowPanel(wx.ScrolledWindow):
             elif entry.getType() == 'Routine' or entry.getType() in getAllStandaloneRoutines():
                 # just get currX based on text size, don't draw anything yet:
                 currX = self.drawFlowRoutine(pdc, entry, id=ii,
-                                             pos=[currX, self.linePos[1] - 10],
+                                             pos=[currX, linePosY - 10],
                                              draw=False)
-            self.gapMidPoints.append(currX + gap / 2)
+            self.gapMidPoints.append(currX + gap // 2)
             self.gapNestLevels.append(nestLevel)
             pdc.SetId(lineId)
-            pdc.SetPen(wx.Pen(colour=cs['fl_flowline_bg']))
-            pdc.DrawLine(x1=currX, y1=self.linePos[1],
-                         x2=currX + gap, y2=self.linePos[1])
+            pdc.SetPen(wx.Pen(colour=colors.app['fl_flowline_bg']))
+            pdc.DrawLine(
+                x1=int(currX),
+                y1=linePosY,
+                x2=int(currX + gap),
+                y2=linePosY)
             currX += gap
-        lineRect = wx.Rect(self.linePos[0] - 2, self.linePos[1] - 2,
-                           currX - self.linePos[0] + 2, 4)
+
+        lineRect = wx.Rect(
+            linePosX - 2,
+            linePosY - 2,
+            int(currX) - linePosX + 2,
+            4)
         pdc.SetIdBounds(lineId, lineRect)
 
         # draw the loops first:
@@ -3391,31 +4152,34 @@ class FlowPanel(wx.ScrolledWindow):
             thisTerm = self.loops[thisLoop]['term']
             thisNest = maxNestLevel - self.loops[thisLoop]['nest'] - 1
             thisId = self.loops[thisLoop]['id']
-            height = (self.linePos[1] + dLoopToBaseLine +
+            height = (linePosY + dLoopToBaseLine +
                       thisNest * dBetweenLoops)
             self.drawLoop(pdc, thisLoop, id=thisId,
                           startX=thisInit, endX=thisTerm,
-                          base=self.linePos[1], height=height)
-            self.drawLoopStart(pdc, pos=[thisInit, self.linePos[1]])
-            self.drawLoopEnd(pdc, pos=[thisTerm, self.linePos[1]])
+                          base=linePosY, height=height)
+            self.drawLoopStart(pdc, pos=[thisInit, linePosY])
+            self.drawLoopEnd(pdc, pos=[thisTerm, linePosY])
             if height > maxHeight:
                 maxHeight = height
 
         # draw routines second (over loop lines):
-        currX = self.linePos[0]
+        currX = int(self.linePos[0])
         for ii, entry in enumerate(expFlow):
             if entry.getType() == 'Routine' or entry.getType() in getAllStandaloneRoutines():
-                currX = self.drawFlowRoutine(pdc, entry, id=ii,
-                                             pos=[currX, self.linePos[1] - 10])
-            pdc.SetPen(wx.Pen(wx.Pen(colour=cs['fl_flowline_bg'])))
-            pdc.DrawLine(x1=currX, y1=self.linePos[1],
-                         x2=currX + gap, y2=self.linePos[1])
+                currX = self.drawFlowRoutine(
+                    pdc, entry, id=ii, pos=[currX, linePosY - 10])
+            pdc.SetPen(wx.Pen(wx.Pen(colour=colors.app['fl_flowline_bg'])))
+            pdc.DrawLine(
+                x1=int(currX),
+                y1=linePosY,
+                x2=int(currX + gap),
+                y2=linePosY)
             currX += gap
 
         self.SetVirtualSize(size=(currX + 100, maxHeight + 50))
 
-        self.drawLineStart(pdc, (self.linePos[0] - gap, self.linePos[1]))
-        self.drawLineEnd(pdc, (currX, self.linePos[1]))
+        self.drawLineStart(pdc, (linePosX - gap, linePosY))
+        self.drawLineEnd(pdc, (currX, linePosY))
 
         # refresh the visible window after drawing (using OnPaint)
         self.Refresh()
@@ -3423,13 +4187,14 @@ class FlowPanel(wx.ScrolledWindow):
     def drawEntryPoints(self, posList):
         ptSize = (3, 4, 5)[self.appData['flowSize']]
         for n, pos in enumerate(posList):
+            pos = int(pos)
             if n >= len(self.entryPointPosList):
                 # draw for first time
                 id = wx.NewIdRef()
                 self.entryPointIDlist.append(id)
                 self.pdc.SetId(id)
-                self.pdc.SetBrush(wx.Brush(cs['fl_flowline_bg']))
-                self.pdc.DrawCircle(pos, self.linePos[1], ptSize)
+                self.pdc.SetBrush(wx.Brush(colors.app['fl_flowline_bg']))
+                self.pdc.DrawCircle(pos, int(self.linePos[1]), ptSize)
                 r = self.pdc.GetIdBounds(id)
                 self.OffsetRect(r)
                 self.RefreshRect(r, False)
@@ -3440,7 +4205,7 @@ class FlowPanel(wx.ScrolledWindow):
                 dx = pos - self.entryPointPosList[n]
                 dy = 0
                 r = self.pdc.GetIdBounds(self.entryPointIDlist[n])
-                self.pdc.TranslateId(self.entryPointIDlist[n], dx, dy)
+                self.pdc.TranslateId(self.entryPointIDlist[n], int(dx), int(dy))
                 r2 = self.pdc.GetIdBounds(self.entryPointIDlist[n])
                 # combine old and new locations to get redraw area
                 rectToRedraw = r.Union(r2)
@@ -3464,20 +4229,27 @@ class FlowPanel(wx.ScrolledWindow):
 
     def drawLineStart(self, dc, pos):
         # draw bar at start of timeline; circle looked bad, offset vertically
+        tmpId = wx.NewIdRef(count=1)
+        dc.SetId(tmpId)
         ptSize = (9, 9, 12)[self.appData['flowSize']]
         thic = (1, 1, 2)[self.appData['flowSize']]
-        dc.SetBrush(wx.Brush(cs['fl_flowline_bg']))
-        dc.SetPen(wx.Pen(cs['fl_flowline_bg']))
-        dc.DrawPolygon([[0, -ptSize], [thic, -ptSize],
-                        [thic, ptSize], [0, ptSize]], pos[0], pos[1])
+        dc.SetBrush(wx.Brush(colors.app['fl_flowline_bg']))
+        dc.SetPen(wx.Pen(colors.app['fl_flowline_bg']))
+
+        posX, posY = pos
+        dc.DrawPolygon(
+            [[0, -ptSize], [thic, -ptSize], [thic, ptSize], [0, ptSize]],
+            int(posX), int(posY))
 
     def drawLineEnd(self, dc, pos):
         # draws arrow at end of timeline
-        # tmpId = wx.NewIdRef()
-        # dc.SetId(tmpId)
-        dc.SetBrush(wx.Brush(cs['fl_flowline_bg']))
-        dc.SetPen(wx.Pen(cs['fl_flowline_bg']))
-        dc.DrawPolygon([[0, -3], [5, 0], [0, 3]], pos[0], pos[1])
+        tmpId = wx.NewIdRef(count=1)
+        dc.SetId(tmpId)
+        dc.SetBrush(wx.Brush(colors.app['fl_flowline_bg']))
+        dc.SetPen(wx.Pen(colors.app['fl_flowline_bg']))
+
+        posX, posY = pos
+        dc.DrawPolygon([[0, -3], [5, 0], [0, 3]], int(posX), int(posY))
         # dc.SetIdBounds(tmpId,wx.Rect(pos[0],pos[1]+3,5,6))
 
     def drawLoopEnd(self, dc, pos, downwards=True):
@@ -3494,28 +4266,44 @@ class FlowPanel(wx.ScrolledWindow):
         # else:
         #   dc.DrawPolygon([[size, size], [0, 0], [-size, size]],
         #   pos[0], pos[1]-3*size)  # points up
+
+        posX, posY = pos
+        doubleSize = int(2 * size)
         dc.SetIdBounds(tmpId, wx.Rect(
-            pos[0] - size, pos[1] - size, 2 * size, 2 * size))
+            int(posX) - size, int(posY) - size,
+            doubleSize,
+            doubleSize))
+
         return
 
     def drawLoopStart(self, dc, pos, downwards=True):
         # draws direction arrow on left side of a loop
         tmpId = wx.NewIdRef()
         dc.SetId(tmpId)
-        dc.SetBrush(wx.Brush(cs['fl_flowline_bg']))
-        dc.SetPen(wx.Pen(cs['fl_flowline_bg']))
+        dc.SetBrush(wx.Brush(colors.app['fl_flowline_bg']))
+        dc.SetPen(wx.Pen(colors.app['fl_flowline_bg']))
+
         size = (3, 4, 5)[self.appData['flowSize']]
         offset = (3, 2, 0)[self.appData['flowSize']]
+        posX, posY = [int(x) for x in pos]
         if downwards:
-            dc.DrawPolygon([[size, size], [0, 0], [-size, size]],
-                           pos[0], pos[1] + 3 * size - offset)  # points up
+            dc.DrawPolygon(
+                [[size, size], [0, 0], [-size, size]],
+                posX, posY + 3 * size - offset)  # points up
         else:
-            dc.DrawPolygon([[size, 0], [0, size], [-size, 0]],
-                           pos[0], pos[1] - 4 * size)  # points down
-        dc.SetIdBounds(tmpId, wx.Rect(
-            pos[0] - size, pos[1] - size, 2 * size, 2 * size))
+            dc.DrawPolygon(
+                [[size, 0], [0, size], [-size, 0]],
+                posX,
+                posY - 4 * size)  # points down
 
-    def drawFlowRoutine(self, dc, routine, id, pos=[0, 0], draw=True):
+        doubleSize = int(2 * size)
+        dc.SetIdBounds(tmpId, wx.Rect(
+            posX - size,
+            posY - size,
+            doubleSize,
+            doubleSize))
+
+    def drawFlowRoutine(self, dc, routine, id, pos=(0, 0), draw=True):
         """Draw a box to show a routine on the timeline
         draw=False is for a dry-run, esp to compute and return size
         without drawing or setting a pdc ID
@@ -3530,35 +4318,45 @@ class FlowPanel(wx.ScrolledWindow):
         font = self.GetFont()
         if sys.platform == 'darwin':
             fontSizeDelta = (9, 6, 0)[self.appData['flowSize']]
-            font.SetPointSize(1400 / self.dpi - fontSizeDelta)
+            font.SetPointSize(1400 // self.dpi - fontSizeDelta)
         elif sys.platform.startswith('linux'):
             fontSizeDelta = (6, 4, 0)[self.appData['flowSize']]
-            font.SetPointSize(1400 / self.dpi - fontSizeDelta)
+            font.SetPointSize(1400 // self.dpi - fontSizeDelta)
         else:
             fontSizeDelta = (8, 4, 0)[self.appData['flowSize']]
-            font.SetPointSize(1000 / self.dpi - fontSizeDelta)
+            font.SetPointSize(1000 // self.dpi - fontSizeDelta)
+        # if selected, bold text
+        if routine == self.frame.routinePanel.getCurrentRoutine():
+            font.SetWeight(wx.FONTWEIGHT_BOLD)
+        else:
+            font.SetWeight(wx.FONTWEIGHT_NORMAL)
 
         maxTime, nonSlip = routine.getMaxTime()
-        if nonSlip:
-            rtFill = cs['fl_routine_bg_nonslip']
-            rtEdge = cs['fl_routine_bg_nonslip']
-            rtText = cs['fl_routine_fg']
+        if hasattr(routine, "disabled") and routine.disabled:
+            rtFill = colors.app['rt_comp_disabled']
+            rtEdge = colors.app['rt_comp_disabled']
+            rtText = colors.app['fl_routine_fg']
+        elif nonSlip:
+            rtFill = colors.app['fl_routine_bg_nonslip']
+            rtEdge = colors.app['fl_routine_bg_nonslip']
+            rtText = colors.app['fl_routine_fg']
         else:
-            rtFill = cs['fl_routine_bg_slip']
-            rtEdge = cs['fl_routine_bg_slip']
-            rtText = cs['fl_routine_fg']
+            rtFill = colors.app['fl_routine_bg_slip']
+            rtEdge = colors.app['fl_routine_bg_slip']
+            rtText = colors.app['fl_routine_fg']
 
         # get size based on text
         self.SetFont(font)
         if draw:
             dc.SetFont(font)
         w, h = self.GetFullTextExtent(name)[0:2]
+        pos = [int(x) for x in pos]  # explicit type conversion for position
         pad = (5, 10, 20)[self.appData['flowSize']]
         # draw box
-        pos[1] += 2 - self.appData['flowSize']
-        rect = wx.Rect(pos[0], pos[1], w + pad, h + pad)
+        rect = wx.Rect(pos[0], pos[1] + 2 - self.appData['flowSize'],
+                       w + pad, h + pad)
         endX = pos[0] + w + pad
-        # the edge should match the text
+        # the edge should match the text, unless selected
         if draw:
             dc.SetPen(wx.Pen(wx.Colour(rtEdge[0], rtEdge[1],
                                        rtEdge[2], wx.ALPHA_OPAQUE)))
@@ -3569,10 +4367,11 @@ class FlowPanel(wx.ScrolledWindow):
             dc.SetTextForeground(rtText)
             dc.DrawLabel(name, rect, alignment=wx.ALIGN_CENTRE)
             if nonSlip and self.appData['flowSize'] != 0:
-                font.SetPointSize(font.GetPointSize() * 0.6)
+                font.SetPointSize(int(font.GetPointSize() * 0.6))
                 dc.SetFont(font)
                 _align = wx.ALIGN_CENTRE | wx.ALIGN_BOTTOM
-                dc.DrawLabel("(%.2fs)" % maxTime, rect, alignment=_align)
+                timeRect = wx.Rect(rect.Left, rect.Top, rect.Width, rect.Height-2)
+                dc.DrawLabel("(%.2fs)" % maxTime, timeRect, alignment=_align)
 
             self.componentFromID[id] = routine
             # set the area for this component
@@ -3580,8 +4379,8 @@ class FlowPanel(wx.ScrolledWindow):
 
         return endX
 
-    def drawLoop(self, dc, loop, id, startX, endX,
-                 base, height, downwards=True):
+    def drawLoop(self, dc, loop, id, startX, endX, base, height,
+                 downwards=True):
         if downwards:
             up = -1
         else:
@@ -3592,9 +4391,13 @@ class FlowPanel(wx.ScrolledWindow):
         dc.SetId(tmpId)
         # extra distance, in both h and w for curve
         curve = (6, 11, 15)[self.appData['flowSize']]
+        # convert args types to `int`
+        startX, endX, base, height = [
+            int(x) for x in (startX, endX, base, height)]
+
         yy = [base, height + curve * up, height +
-              curve * up / 2, height]  # for area
-        dc.SetPen(wx.Pen(cs['fl_flowline_bg']))
+              curve * up // 2, height]  # for area
+        dc.SetPen(wx.Pen(colors.app['fl_flowline_bg']))
         vertOffset = 0  # 1 is interesting too
         area = wx.Rect(startX, base + vertOffset,
                        endX - startX, max(yy) - min(yy))
@@ -3637,37 +4440,241 @@ class FlowPanel(wx.ScrolledWindow):
 
         dc.SetId(id)
         font = self.GetFont()
+        font.SetWeight(wx.FONTWEIGHT_NORMAL)
         if sys.platform == 'darwin':
             basePtSize = (650, 750, 900)[flowsize]
         elif sys.platform.startswith('linux'):
             basePtSize = (750, 850, 1000)[flowsize]
         else:
             basePtSize = (700, 750, 800)[flowsize]
-        font.SetPointSize(basePtSize / self.dpi)
+        font.SetPointSize(basePtSize // self.dpi)
         self.SetFont(font)
         dc.SetFont(font)
 
         # get size based on text
         pad = (5, 8, 10)[self.appData['flowSize']]
         w, h = self.GetFullTextExtent(name)[0:2]
-        x = startX + (endX - startX) / 2 - w / 2 - pad / 2
-        y = (height - h / 2)
+        x = startX + (endX - startX) // 2 - w // 2 - pad // 2
+        y = (height - h // 2)
 
         # draw box
-        rect = wx.Rect(x, y, w + pad, h + pad)
+        rect = wx.Rect(int(x), int(y), int(w + pad), int(h + pad))
         # the edge should match the text
-        dc.SetPen(wx.Pen(cs['fl_flowline_bg']))
+        dc.SetPen(wx.Pen(colors.app['fl_flowline_bg']))
         # try to make the loop fill brighter than the background canvas:
-        dc.SetBrush(wx.Brush(cs['fl_flowline_bg']))
+        dc.SetBrush(wx.Brush(colors.app['fl_flowline_bg']))
 
         dc.DrawRoundedRectangle(rect, (4, 6, 8)[flowsize])
         # draw text
-        dc.SetTextForeground(cs['fl_flowline_fg'])
-        dc.DrawText(name, x + pad / 2, y + pad / 2)
+        dc.SetTextForeground(colors.app['fl_flowline_fg'])
+        dc.DrawText(name, x + pad // 2, y + pad // 2)
 
         self.componentFromID[id] = loop
         # set the area for this component
         dc.SetIdBounds(id, rect)
+
+
+class BuilderRibbon(ribbon.FrameRibbon):
+    def __init__(self, parent):
+        # initialize
+        ribbon.FrameRibbon.__init__(self, parent)
+
+        # --- File ---
+        self.addSection(
+            "file", label=_translate("File"), icon="file"
+        )
+        # file new
+        self.addButton(
+            section="file", name="new", label=_translate("New"), icon="filenew",
+            tooltip=_translate("Create new experiment file"),
+            callback=parent.app.newBuilderFrame
+        )
+        # file open
+        self.addButton(
+            section="file", name="open", label=_translate("Open"), icon="fileopen",
+            tooltip=_translate("Open an existing experiment file"),
+            callback=parent.fileOpen
+        )
+        # file save
+        self.addButton(
+            section="file", name="save", label=_translate("Save"), icon="filesave",
+            tooltip=_translate("Save current experiment file"),
+            callback=parent.fileSave
+        )
+        # file save as
+        self.addButton(
+            section="file", name="saveas", label=_translate("Save as..."), icon="filesaveas",
+            tooltip=_translate("Save current experiment file as..."),
+            callback=parent.fileSaveAs
+        )
+
+        self.addSeparator()
+
+        # --- Edit ---
+        self.addSection(
+            "edit", label=_translate("Edit"), icon="edit"
+        )
+        # undo
+        self.addButton(
+            section="edit", name="undo", label=_translate("Undo"), icon="undo",
+            tooltip=_translate("Undo last action"),
+            callback=parent.undo
+        )
+        # redo
+        self.addButton(
+            section="edit", name="redo", label=_translate("Redo"), icon="redo",
+            tooltip=_translate("Redo last action"),
+            callback=parent.redo
+        )
+        # find
+        self.addButton(
+            section="edit", name="find", label=_translate("Find"), icon="find",
+            tooltip=_translate("Search the whole experiment for a specific term"),
+            callback=parent.onFindInExperiment
+        )
+
+        self.addSeparator()
+
+        # --- Tools ---
+        self.addSection(
+            "experiment", label=_translate("Experiment"), icon="experiment"
+        )
+        # monitor center
+        self.addButton(
+            section="experiment", name='monitor', label=_translate('Monitor center'),
+            icon="monitors",
+            tooltip=_translate("Monitor settings and calibration"),
+            callback=parent.app.openMonitorCenter
+        )
+        # settings
+        self.addButton(
+            section="experiment", name='expsettings', label=_translate('Experiment settings'), icon="expsettings",
+            tooltip=_translate("Edit experiment settings"),
+            callback=parent.setExperimentSettings
+        )
+        # switch run/pilot
+        self.addSwitchCtrl(
+            section="experiment", name="pyswitch",
+            labels=(_translate("Pilot"), _translate("Run")),
+            startMode=0, callback=parent.onRunModeToggle,
+            style=wx.HORIZONTAL
+        )
+        # send to runner
+        self.addButton(
+            section="experiment", name='sendRunner', label=_translate('Runner'), icon="runner",
+            tooltip=_translate("Send experiment to Runner"),
+            callback=parent.sendToRunner
+        )
+        # send to runner (pilot icon)
+        self.addButton(
+            section="experiment", name='pilotRunner', label=_translate('Runner'),
+            icon="runnerPilot",
+            tooltip=_translate("Send experiment to Runner"),
+            callback=parent.sendToRunner
+        )
+
+        self.addSeparator()
+
+        # --- Python ---
+        self.addSection(
+            "py", label=_translate("Desktop"), icon="desktop"
+        )
+        # compile python
+        self.addButton(
+            section="py", name="pycompile", label=_translate('Write Python'), icon='compile_py',
+            tooltip=_translate("Write experiment as a Python script"),
+            callback=parent.compileScript
+        )
+        # pilot Py
+        self.addButton(
+            section="py", name="pypilot", label=_translate("Pilot"), icon='pyPilot',
+            tooltip=_translate("Run the current script in Python with piloting features on"),
+            callback=parent.pilotFile
+        )
+        # run Py
+        self.addButton(
+            section="py", name="pyrun", label=_translate("Run"), icon='pyRun',
+            tooltip=_translate("Run the current script in Python"),
+            callback=parent.runFile
+        )
+
+        self.addSeparator()
+
+        # --- JS ---
+        self.addSection(
+            "browser", label=_translate("Browser"), icon="browser"
+        )
+        # compile JS
+        self.addButton(
+            section="browser", name="jscompile", label=_translate('Write JS'), icon='compile_js',
+            tooltip=_translate("Write experiment as a JavaScript (JS) script"),
+            callback=parent.fileExport
+        )
+        # pilot JS
+        self.addButton(
+            section="browser", name="jspilot", label=_translate("Pilot in browser"),
+            icon='jsPilot',
+            tooltip=_translate("Pilot experiment locally in your browser"),
+            callback=parent.onPavloviaDebug
+        )
+        # run JS
+        self.addButton(
+            section="browser", name="jsrun", label=_translate("Run on Pavlovia"), icon='jsRun',
+            tooltip=_translate("Run experiment on Pavlovia"),
+            callback=parent.onPavloviaRun
+        )
+        # sync project
+        self.addButton(
+            section="browser", name="pavsync", label=_translate("Sync"), icon='pavsync',
+            tooltip=_translate("Sync project with Pavlovia"),
+            callback=parent.onPavloviaSync
+        )
+
+        self.addSeparator()
+
+        # --- JS ---
+        self.addSection(
+            "pavlovia", label=_translate("Pavlovia"), icon="pavlovia"
+        )
+        # pavlovia user
+        self.addPavloviaUserCtrl(
+            section="pavlovia", name="pavuser", frame=parent
+        )
+        # pavlovia project
+        self.addPavloviaProjectCtrl(
+            section="pavlovia", name="pavproject", frame=parent
+        )
+
+        self.addSeparator()
+
+        # --- Plugin sections ---
+        self.addPluginSections("psychopy.app.builder")
+
+        # --- Views ---
+        self.addStretchSpacer()
+        self.addSeparator()
+
+        self.addSection(
+            "views", label=_translate("Views"), icon="windows"
+        )
+        # show Builder
+        self.addButton(
+            section="views", name="builder", label=_translate("Show Builder"), icon="showBuilder",
+            tooltip=_translate("Switch to Builder view"),
+            callback=parent.app.showBuilder
+        ).Disable()
+        # show Coder
+        self.addButton(
+            section="views", name="coder", label=_translate("Show Coder"), icon="showCoder",
+            tooltip=_translate("Switch to Coder view"),
+            callback=parent.app.showCoder
+        )
+        # show Runner
+        self.addButton(
+            section="views", name="runner", label=_translate("Show Runner"), icon="showRunner",
+            tooltip=_translate("Switch to Runner view"),
+            callback=parent.app.showRunner
+        )
 
 def extractText(stream):
     """Take a byte stream (or any file object of type b?) and return
@@ -3675,7 +4682,4 @@ def extractText(stream):
     :param stream: stream from wx.Process or any byte stream from a file
     :return: text converted to unicode ready for appending to wx text view
     """
-    if constants.PY3:
-        return stream.read().decode('utf-8')
-    else:
-        return stream.read()
+    return stream.read().decode('utf-8')

@@ -5,21 +5,18 @@
 # Copyright (C) 2009 Jonathan Peirce
 # Distributed under the terms of the GNU General Public License (GPL).
 
-from __future__ import absolute_import, print_function
-
-# from future import standard_library
-# standard_library.install_aliases()
 from pathlib import Path
 
-from past.builtins import unicode
-from builtins import chr
-from builtins import range
 import wx
 import wx.stc
 import wx.richtext
+import wx.py
 import psychopy.app
-from psychopy.app.themes._themes import ThemeSwitcher
+from ..pavlovia_ui.search import SearchFrame
+from ..pavlovia_ui.user import UserFrame
+from ..themes.ui import ThemeSwitcher
 from wx.html import HtmlEasyPrinting
+from wx._core import wxAssertionError
 
 import wx.lib.agw.aui as aui  # some versions of phoenix
 
@@ -34,21 +31,25 @@ import time
 import textwrap
 import codecs
 
-from .. import stdOutRich, dialogs
+from .. import dialogs, ribbon
+from ..stdout import stdOutRich
 from .. import pavlovia_ui
 from psychopy import logging, prefs
 from psychopy.alerts._alerts import alert
 from psychopy.localization import _translate
-from ..utils import FileDropTarget, PsychopyToolbar, FrameSwitcher, updateDemosMenu
+from ..utils import FileDropTarget, BasePsychopyToolbar, FrameSwitcher, updateDemosMenu
+from ..ui import BaseAuiFrame
 from psychopy.projects import pavlovia
 import psychopy.app.pavlovia_ui.menu
+import psychopy.app.plugin_manager.dialog
 from psychopy.app.errorDlg import exceptionCallback
 from psychopy.app.coder.codeEditorBase import BaseCodeEditor
 from psychopy.app.coder.fileBrowser import FileBrowserPanel
 from psychopy.app.coder.sourceTree import SourceTreePanel
-from psychopy.app.themes import ThemeMixin
+from psychopy.app.themes import handlers, colors
 from psychopy.app.coder.folding import CodeEditorFoldingMixin
-from psychopy.app.coder.scriptOutput import ScriptOutputPanel
+from psychopy.app.stdout.stdOutRich import ScriptOutputPanel
+from psychopy.app.coder.repl import PythonREPLCtrl
 # from ..plugin_manager import PluginManagerFrame
 
 try:
@@ -78,14 +79,6 @@ try:  # needed for wx.py shell
 except Exception:
     haveCode = False
 
-_localized = {'basic': _translate('basic'),
-              'input': _translate('input'),
-              'stimuli': _translate('stimuli'),
-              'experiment control': _translate('exp control'),
-              'iohub': 'ioHub',  # no translation
-              'hardware': _translate('hardware'),
-              'timing': _translate('timing'),
-              'misc': _translate('misc')}
 
 def toPickle(filename, data):
     """save data (of any sort) as a pickle file
@@ -107,69 +100,10 @@ def fromPickle(filename):
     return contents
 
 
-class PsychopyPyShell(wx.py.shell.Shell, ThemeMixin):
-    """Simple class wrapper for Pyshell which uses the Psychopy ThemeMixin."""
-    def __init__(self, coder):
-        msg = _translate('PyShell in PsychoPy - type some commands!')
-        wx.py.shell.Shell.__init__(
-            self, coder.shelf, -1, introText=msg + '\n\n', style=wx.BORDER_NONE)
-        self.prefs = coder.prefs
-        self.paths = coder.paths
-        self.app = coder.app
-
-        self.Bind(wx.EVT_SET_FOCUS, self.OnSetFocus)
-        self.Bind(wx.EVT_KILL_FOCUS, self.OnKillFocus)
-
-        # Set theme to match code editor
-        self._applyAppTheme()
-
-    def OnSetFocus(self, evt=None):
-        """Called when the shell gets focus."""
-        # Switch to the default callback when in console, prevents the PsychoPy
-        # error dialog from opening.
-        sys.excepthook = sys.__excepthook__
-
-        if evt:
-            evt.Skip()
-
-    def OnKillFocus(self, evt=None):
-        """Called when the shell loses focus."""
-        # Set the callback to use the dialog when errors occur outside the
-        # shell.
-        if not self.app._called_from_test:
-            sys.excepthook = exceptionCallback
-
-        if evt:
-            evt.Skip()
-
-    def GetContextMenu(self):
-        """Override original method (wx.py.shell.Shell.GetContextMenu)
-        to localize context menu.  Simply added _translate() to
-        original code.
-        """
-        menu = wx.Menu()
-        menu.Append(self.ID_UNDO, _translate("Undo"))
-        menu.Append(self.ID_REDO, _translate("Redo"))
-
-        menu.AppendSeparator()
-
-        menu.Append(self.ID_CUT, _translate("Cut"))
-        menu.Append(self.ID_COPY, _translate("Copy"))
-        menu.Append(wx.py.frame.ID_COPY_PLUS, _translate("Copy With Prompts"))
-        menu.Append(self.ID_PASTE, _translate("Paste"))
-        menu.Append(wx.py.frame.ID_PASTE_PLUS, _translate("Paste And Run"))
-        menu.Append(self.ID_CLEAR, _translate("Clear"))
-
-        menu.AppendSeparator()
-
-        menu.Append(self.ID_SELECTALL, _translate("Select All"))
-        return menu
-
-
 class Printer(HtmlEasyPrinting):
     """bare-bones printing, no control over anything
 
-    from http://wiki.wxpython.org/Printing
+    from https://wiki.wxpython.org/Printing
     """
 
     def __init__(self):
@@ -294,8 +228,8 @@ class UnitTestFrame(wx.Frame):
         def write(self, inStr):
             self.MoveEnd()  # always 'append' text rather than 'writing' it
             for thisLine in inStr.splitlines(True):
-                if not isinstance(thisLine, unicode):
-                    thisLine = unicode(thisLine)
+                if not isinstance(thisLine, str):
+                    thisLine = str(thisLine)
                 if thisLine.startswith('OK'):
                     self.BeginBold()
                     self.BeginTextColour(self.good)
@@ -568,7 +502,7 @@ class UnitTestFrame(wx.Frame):
         self.Destroy()
 
 
-class CodeEditor(BaseCodeEditor, CodeEditorFoldingMixin, ThemeMixin):
+class CodeEditor(BaseCodeEditor, CodeEditorFoldingMixin, handlers.ThemeMixin):
     """Code editor class for the Coder GUI.
     """
     def __init__(self, parent, ID, frame,
@@ -651,9 +585,9 @@ class CodeEditor(BaseCodeEditor, CodeEditorFoldingMixin, ThemeMixin):
                 self.caretLine + 1, self.caretColumn + 1), 1)
 
         # calltips
-        self.CallTipSetBackground(ThemeMixin.codeColors['base']['bg'])
-        self.CallTipSetForeground(ThemeMixin.codeColors['base']['fg'])
-        self.CallTipSetForegroundHighlight(ThemeMixin.codeColors['select']['fg'])
+        self.CallTipSetBackground(colors.app['tab_bg'])
+        self.CallTipSetForeground(colors.app['text'])
+        self.CallTipSetForegroundHighlight(colors.app['text'])
         self.AutoCompSetIgnoreCase(True)
         self.AutoCompSetAutoHide(True)
         self.AutoCompStops('. ')
@@ -705,7 +639,9 @@ class CodeEditor(BaseCodeEditor, CodeEditorFoldingMixin, ThemeMixin):
                   'R': 'R',
                   'JavaScript': 'cpp',
                   'JSON': 'json',
-                  'Plain Text': 'null'}
+                  'Markdown': 'markdown',
+                  'Plain Text': 'null',
+                  }
         self.setLexer(lexers[self.getFileType()])
 
     def getFileType(self):
@@ -741,11 +677,13 @@ class CodeEditor(BaseCodeEditor, CodeEditorFoldingMixin, ThemeMixin):
             return 'JavaScript'
         elif filen.endswith('.json'):  # JSON
             return 'JSON'
+        elif filen.endswith('.md'):  # Markdown
+            return 'Markdown'
         else:
             return 'Plain Text'  # default, null lexer used
 
     def getTextUptoCaret(self):
-        """Get the text upto the caret."""
+        """Get the text up to the caret."""
         return self.GetTextRange(0, self.caretCurrentPos)
 
     def OnKeyReleased(self, event):
@@ -904,8 +842,8 @@ class CodeEditor(BaseCodeEditor, CodeEditorFoldingMixin, ThemeMixin):
                     calltipText = '\n    '.join(
                         textwrap.wrap(calltipText, 76))  # 80 cols after indent
                     y, x = foundRefs[0].bracket_start
-                    self.CallTipShow(
-                        self.XYToPosition(x + 1, y), calltipText)
+                    callTipPos = self.XYToPosition(x, y)
+                    self.CallTipShow(callTipPos, calltipText)
 
     def MacOpenFile(self, evt):
         logging.debug('PsychoPyCoder: got MacOpenFile event')
@@ -1025,7 +963,7 @@ class CodeEditor(BaseCodeEditor, CodeEditorFoldingMixin, ThemeMixin):
         self.SetZoom(0)
 
     def analyseScript(self):
-        """Parse the the document and update the source tree if present.
+        """Parse the document and update the source tree if present.
 
         The script is analysed when loaded or when the user interact with it in
         a way that can potentially change the number of lines of executable
@@ -1102,8 +1040,9 @@ class CodeEditor(BaseCodeEditor, CodeEditorFoldingMixin, ThemeMixin):
         backward = not (findData.GetFlags() & wx.FR_DOWN)
         matchcase = (findData.GetFlags() & wx.FR_MATCHCASE) != 0
         end = self.GetLength()
-        textstring = self.GetTextRange(0, end)
-        findstring = findData.GetFindString()
+        # Byte string is necessary to let SetSelection() work properly
+        textstring = self.GetTextRangeRaw(0, end)
+        findstring = findData.GetFindString().encode('utf-8')
         if not matchcase:
             textstring = textstring.lower()
             findstring = findstring.lower()
@@ -1114,7 +1053,7 @@ class CodeEditor(BaseCodeEditor, CodeEditorFoldingMixin, ThemeMixin):
             start = self.GetSelection()[1]
             loc = textstring.find(findstring, start)
 
-        # if it wasn't found then restart at begining
+        # if it wasn't found then restart at beginning
         if loc == -1 and start != 0:
             if backward:
                 start = end
@@ -1126,7 +1065,7 @@ class CodeEditor(BaseCodeEditor, CodeEditorFoldingMixin, ThemeMixin):
         # was it still not found?
         if loc == -1:
             dlg = dialogs.MessageDialog(self, message=_translate(
-                'Unable to find "%s"') % findstring, type='Info')
+                'Unable to find "%s"') % findstring.decode('utf-8'), type='Info')
             dlg.ShowModal()
             dlg.Destroy()
         else:
@@ -1143,7 +1082,7 @@ class CodeEditor(BaseCodeEditor, CodeEditorFoldingMixin, ThemeMixin):
             #     findDlg.Close()
 
 
-class CoderFrame(wx.Frame, ThemeMixin):
+class CoderFrame(BaseAuiFrame, handlers.ThemeMixin):
 
     def __init__(self, parent, ID, title, files=(), app=None):
         self.app = app  # type: psychopy.app.PsychoPyApp
@@ -1160,7 +1099,9 @@ class CoderFrame(wx.Frame, ThemeMixin):
         self.fileStatusLastChecked = time.time()
         self.fileStatusCheckInterval = 5 * 60  # sec
         self.showingReloadDialog = False
-        self.btnHandles = {}  # stores toolbar buttons so they can be altered
+
+        # default window title string
+        self.winTitle = "PsychoPy Coder (v{})".format(self.app.version)
 
         # we didn't have the key or the win was minimized/invalid
         if self.appData['winH'] == 0 or self.appData['winW'] == 0:
@@ -1172,21 +1113,16 @@ class CoderFrame(wx.Frame, ThemeMixin):
         if self.appData['winX'] == -32000:
             self.appData['winX'], self.appData['winY'] = wx.DefaultPosition
             self.appData['winH'], self.appData['winW'] = wx.DefaultSize
-        wx.Frame.__init__(self, parent, ID, title,
-                          (self.appData['winX'], self.appData['winY']),
-                          size=(self.appData['winW'], self.appData['winH']))
+
+        BaseAuiFrame.__init__(
+            self, parent, ID, title,
+            (self.appData['winX'], self.appData['winY']),
+            (self.appData['winW'], self.appData['winH']))
 
         # detect retina displays (then don't use double-buffering)
         self.isRetina = \
             self.GetContentScaleFactor() != 1 and wx.Platform == '__WXMAC__'
 
-        # create a panel which the aui manager can hook onto
-        szr = wx.BoxSizer(wx.VERTICAL)
-        self.pnlMain = wx.Panel(self)
-        szr.Add(self.pnlMain, flag=wx.EXPAND | wx.ALL, proportion=1)
-        self.SetSizer(szr)
-
-        # self.panel = wx.Panel(self)
         self.Hide()  # ugly to see it all initialise
         # create icon
         if sys.platform == 'darwin':
@@ -1217,29 +1153,31 @@ class CoderFrame(wx.Frame, ThemeMixin):
         self.SetAcceleratorTable(accelTable)
 
         # Setup pane and art managers
-        self.paneManager = aui.AuiManager(
-            self.pnlMain, aui.AUI_MGR_DEFAULT | aui.AUI_MGR_RECTANGLE_HINT)
+        self.paneManager = self.getAuiManager()
 
-        # Create toolbar
-        self.toolbar = PsychopyToolbar(self)
-        self.SetToolBar(self.toolbar)
         # Create menus and status bar
-        self.makeMenus()
-        self.makeStatusBar()
         self.fileMenu = self.editMenu = self.viewMenu = None
         self.helpMenu = self.toolsMenu = None
+        self.makeMenus()
+        self.makeStatusBar()
         self.pavloviaMenu.syncBtn.Enable(bool(self.filename))
         self.pavloviaMenu.newBtn.Enable(bool(self.filename))
         # Link to file drop function
         self.SetDropTarget(FileDropTarget(targetFrame=self))
 
         # Create editor notebook
-        #todo: Why is editor default background not same as usual frame backgrounds?
-        self.notebook = aui.AuiNotebook(
-            self.pnlMain, -1, size=wx.Size(480, 480),
+        self.notebook = StyledNotebook(
+            self, -1, size=wx.Size(480, 480),
             agwStyle=aui.AUI_NB_TAB_MOVE | aui.AUI_NB_CLOSE_ON_ACTIVE_TAB)
 
-        #self.notebook.SetArtProvider(PsychopyTabArt())
+        # add ribbon
+        self.ribbon = CoderRibbon(self)
+        self.paneManager.AddPane(self.ribbon,
+                                 aui.AuiPaneInfo().
+                                 Name("Ribbon").
+                                 DockFixed(True).
+                                 CloseButton(False).MaximizeButton(True).PaneBorder(False).CaptionVisible(False).
+                                 Top())
         # Add editor panel
         self.paneManager.AddPane(self.notebook, aui.AuiPaneInfo().
                                  Name("Editor").
@@ -1253,13 +1191,14 @@ class CoderFrame(wx.Frame, ThemeMixin):
                                  MaximizeButton(True))
 
         # Create source assistant notebook
-        self.sourceAsst = aui.AuiNotebook(
-            self.pnlMain,
+        self.sourceAsst = StyledNotebook(
+            self,
             wx.ID_ANY,
-            size = wx.Size(500, 600),
+            size=wx.Size(500, 600),
             agwStyle=aui.AUI_NB_CLOSE_ON_ALL_TABS |
                      aui.AUI_NB_TAB_SPLIT |
                      aui.AUI_NB_TAB_MOVE)
+        self.sourceAsst.GetAuiManager().SetArtProvider(handlers.PsychopyDockArt())
 
         self.structureWindow = SourceTreePanel(self.sourceAsst, self)
         self.fileBrowserWindow = FileBrowserPanel(self.sourceAsst, self)
@@ -1304,38 +1243,24 @@ class CoderFrame(wx.Frame, ThemeMixin):
                 self.setCurrentDoc(filename, keepHidden=True)
 
         # Create shelf notebook
-        self.shelf = aui.AuiNotebook(
-            self.pnlMain, wx.ID_ANY, size=wx.Size(600, 600),
+        self.shelf = StyledNotebook(
+            self, wx.ID_ANY, size=wx.Size(600, 600),
             agwStyle=aui.AUI_NB_CLOSE_ON_ALL_TABS)
-        #self.shelf.SetArtProvider(PsychopyTabArt())
+        self.shelf.GetAuiManager().SetArtProvider(handlers.PsychopyDockArt())
+
         # Create shell
-        self._useShell = None
-        if haveCode:
-            useDefaultShell = True
-            if self.prefs['preferredShell'].lower() == 'ipython':
-                try:
-                    # Try to use iPython
-                    from IPython.gui.wx.ipython_view import IPShellWidget
-                    self.shell = IPShellWidget(self)
-                    useDefaultShell = False
-                    self._useShell = 'ipython'
-                except Exception:
-                    msg = _translate('IPython failed as shell, using pyshell'
-                                     ' (IPython v0.12 can fail on wx)')
-                    logging.warn(msg)
-            if useDefaultShell:
-                # Default to Pyshell if iPython fails
-                self.shell = PsychopyPyShell(self)
-                self._useShell = 'pyshell'
-            # Add shell to output pane
-            self.shell.SetName("PythonShell")
-            self.shelf.AddPage(self.shell, _translate('Shell'))
-            # Hide close button
+        self._useShell = 'pyshell'
+        self.shell = PythonREPLCtrl(self)
+
+        # Add shell to output pane
+        self.shell.SetName("PythonShell")
+        self.shelf.AddPage(self.shell, _translate('Shell'))
 
         # script output panel
-        self.consoleOutput = ScriptOutputPanel(self.shelf)
+        self.consoleOutputPanel = ScriptOutputPanel(self.shelf)
+        self.consoleOutput = self.consoleOutputPanel.ctrl
         self.consoleOutput.SetName("ConsoleOutput")
-        self.shelf.AddPage(self.consoleOutput, _translate('Output'))
+        self.shelf.AddPage(self.consoleOutputPanel, _translate('Output'))
 
         for i in range(self.shelf.GetPageCount()):
             self.shelf.SetCloseButton(i, False)
@@ -1351,42 +1276,49 @@ class CoderFrame(wx.Frame, ThemeMixin):
                                  BottomDockable(True).TopDockable(True).
                                  CloseButton(False).
                                  Bottom())
-        self._applyAppTheme()
-        if 'pavloviaSync' in self.btnHandles:
-            self.toolbar.EnableTool(self.btnHandles['pavloviaSync'].Id, bool(self.filename))
         self.unitTestFrame = None
 
         # Link to Runner output
         if self.app.runner is None:
             self.app.showRunner()
-        self.outputWindow = self.app.stdStreamDispatcher
+        self.outputWindow = self.consoleOutput
         self.outputWindow.write(_translate('Welcome to PsychoPy3!') + '\n')
         self.outputWindow.write("v%s\n" % self.app.version)
 
         # Manage perspective
+        self.SetMinSize(wx.Size(640, 480))  # min size for whole window
         if (self.appData['auiPerspective'] and
                 'Shelf' in self.appData['auiPerspective']):
-            self.paneManager.LoadPerspective(self.appData['auiPerspective'])
+            try:
+                self.paneManager.LoadPerspective(self.appData['auiPerspective'])
+            except Exception as err:
+                logging.error("Error loading perspective: %s" % err)
+                # defaults for the window if the perspective fails
+                self.SetSize(wx.Size(1024, 800))
+                self.Fit()
             self.paneManager.GetPane('SourceAsst').Caption(_translate("Source Assistant"))
             self.paneManager.GetPane('Editor').Caption(_translate("Editor"))
         else:
-            self.SetMinSize(wx.Size(480, 640))  # min size for whole window
             self.SetSize(wx.Size(1024, 800))
             self.Fit()
         # Update panes PsychopyToolbar
         isExp = filename.endswith(".py") or filename.endswith(".psyexp")
 
-        # if the toolbar is done then adjust buttons
-        if hasattr(self, 'cdrBtnRunner'):
-            self.toolbar.EnableTool(self.cdrBtnRunner.Id, isExp)
-            self.toolbar.EnableTool(self.cdrBtnRun.Id, isExp)
         # Hide panels as specified
         self.paneManager.GetPane("SourceAsst").Show(self.prefs['showSourceAsst'])
         self.paneManager.GetPane("Shelf").Show(self.prefs['showOutput'])
+        self.paneManager.GetPane("Ribbon").Show()
         self.paneManager.Update()
         #self.chkShowAutoComp.Check(self.prefs['autocomplete'])
         self.SendSizeEvent()
         self.app.trackFrame(self)
+
+        self.theme = colors.theme
+
+        # disable save buttons if currentDoc is None
+        if self.currentDoc is None:
+            self.ribbon.buttons['save'].Disable()
+            self.ribbon.buttons['saveas'].Disable()
 
     @property
     def useAutoComp(self):
@@ -1396,14 +1328,21 @@ class CoderFrame(wx.Frame, ThemeMixin):
     def GetAuiManager(self):
         return self.paneManager
 
+    @property
+    def session(self):
+        """
+        Current Pavlovia session
+        """
+        return pavlovia.getCurrentSession()
+
     def outputContextMenu(self, event):
         """Custom context menu for output window.
 
         Provides menu items to clear all, select all and copy selected text."""
         if not hasattr(self, "outputMenuID1"):
-            self.outputMenuID1 = wx.NewId()
-            self.outputMenuID2 = wx.NewId()
-            self.outputMenuID3 = wx.NewId()
+            self.outputMenuID1 = wx.NewIdRef(count=1)
+            self.outputMenuID2 = wx.NewIdRef(count=1)
+            self.outputMenuID3 = wx.NewIdRef(count=1)
 
             self.Bind(wx.EVT_MENU, self.outputClear, id=self.outputMenuID1)
             self.Bind(wx.EVT_MENU, self.outputSelectAll, id=self.outputMenuID2)
@@ -1460,9 +1399,11 @@ class CoderFrame(wx.Frame, ThemeMixin):
         menu.Append(wx.ID_SAVE,
                     _translate("&Save\t%s") % keyCodes['save'],
                     _translate("Save current file"))
+        menu.Enable(wx.ID_SAVE, False)
         menu.Append(wx.ID_SAVEAS,
                     _translate("Save &as...\t%s") % keyCodes['saveAs'],
                     _translate("Save current python file as..."))
+        menu.Enable(wx.ID_SAVEAS, False)
         menu.Append(wx.ID_CLOSE,
                     _translate("&Close file\t%s") % keyCodes['close'],
                     _translate("Close current file"))
@@ -1488,7 +1429,7 @@ class CoderFrame(wx.Frame, ThemeMixin):
             wx.ID_ANY, _translate("Reset preferences...")
         )
         self.Bind(wx.EVT_MENU, self.resetPrefs, item)
-        # item = menu.Append(wx.NewId(), "Plug&ins")
+        # item = menu.Append(wx.NewIdRef(count=1), "Plug&ins")
         # self.Bind(wx.EVT_MENU, self.pluginManager, id=item.GetId())
         # -------------Close coder frame
         menu.AppendSeparator()
@@ -1627,17 +1568,6 @@ class CoderFrame(wx.Frame, ThemeMixin):
         menu = self.viewMenu
         menuBar.Append(self.viewMenu, _translate('&View'))
 
-        # Frame switcher (legacy
-        # item = menu.Append(wx.ID_ANY,
-        #                    _translate("Go to Builder view"),
-        #                    _translate("Go to the Builder view"))
-        # self.Bind(wx.EVT_MENU, self.app.showBuilder, id=item.GetId())
-        #
-        # item = menu.Append(wx.ID_ANY,
-        #                    _translate("Open Runner view"),
-        #                    _translate("Open the Runner view"))
-        # self.Bind(wx.EVT_MENU, self.app.showRunner, item)
-        # menu.AppendSeparator()
         # Panel switcher
         self.panelsMenu = wx.Menu()
         menu.AppendSubMenu(self.panelsMenu,
@@ -1695,9 +1625,31 @@ class CoderFrame(wx.Frame, ThemeMixin):
         self.Bind(wx.EVT_MENU, self.onWordWrapCheck, self.lineWrapChk)
         menu.AppendSeparator()
         # Theme Switcher
-        self.themesMenu = ThemeSwitcher(self)
+        self.themesMenu = ThemeSwitcher(app=self.app)
         menu.AppendSubMenu(self.themesMenu,
-                           _translate("Themes"))
+                           _translate("&Themes"))
+
+        # Frame switcher
+        FrameSwitcher.makeViewSwitcherButtons(menu, frame=self, app=self.app)
+
+        # ---_view---#000000#FFFFFF-------------------------------------------
+        # self.shellMenu = wx.Menu()
+        # menuBar.Append(self.shellMenu, _translate('&Shell'))
+        #
+        # menu = self.shellMenu
+        # item = menu.Append(
+        #     wx.ID_ANY,
+        #     _translate("Start Python Session"),
+        #     _translate("Start a new Python session in the shell."),
+        #     wx.ITEM_NORMAL)
+        # self.Bind(wx.EVT_MENU, self.onStartShellSession, id=item.GetId())
+        # menu.AppendSeparator()
+        # item = menu.Append(
+        #     wx.ID_ANY,
+        #     _translate("Run Line\tF6"),
+        #     _translate("Push the line at the caret to the shell."),
+        #     wx.ITEM_NORMAL)
+        # self.Bind(wx.EVT_MENU, self.onPushLineToShell, id=item.GetId())
 
         # menu.Append(ID_UNFOLDALL, "Unfold All\tF3",
         #   "Unfold all lines", wx.ITEM_NORMAL)
@@ -1722,9 +1674,9 @@ class CoderFrame(wx.Frame, ThemeMixin):
         # self.Bind(wx.EVT_MENU,  self.analyseCodeNow, id=self.IDs.analyzeNow)
 
         self.IDs.cdrRun = menu.Append(wx.ID_ANY,
-                                      _translate("Run\t%s") % keyCodes['runScript'],
+                                      _translate("Run/pilot\t%s") % keyCodes['runScript'],
                                       _translate("Run the current script")).GetId()
-        self.Bind(wx.EVT_MENU, self.runFile, id=self.IDs.cdrRun)
+        self.Bind(wx.EVT_MENU, self.onRunShortcut, id=self.IDs.cdrRun)
         item = menu.Append(wx.ID_ANY,
                                       _translate("Send to runner\t%s") % keyCodes['runnerScript'],
                                       _translate("Send current script to runner")).GetId()
@@ -1735,6 +1687,10 @@ class CoderFrame(wx.Frame, ThemeMixin):
                            _translate("PsychoPy updates..."),
                            _translate("Update PsychoPy to the latest, or a specific, version"))
         self.Bind(wx.EVT_MENU, self.app.openUpdater, id=item.GetId())
+        item = menu.Append(wx.ID_ANY,
+                           _translate("Plugin/packages manager..."),
+                           _translate("Manage Python packages and optional plugins for PsychoPy"))
+        self.Bind(wx.EVT_MENU, self.openPluginManager, item)
         item = menu.Append(wx.ID_ANY,
                            _translate("Benchmark wizard"),
                            _translate("Check software & hardware, generate report"))
@@ -1780,12 +1736,12 @@ class CoderFrame(wx.Frame, ThemeMixin):
 
         # ---_projects---#000000#FFFFFF---------------------------------------
         self.pavloviaMenu = psychopy.app.pavlovia_ui.menu.PavloviaMenu(parent=self)
-        menuBar.Append(self.pavloviaMenu, _translate("Pavlovia.org"))
+        menuBar.Append(self.pavloviaMenu, _translate("&Pavlovia.org"))
 
         # ---_window---#000000#FFFFFF-----------------------------------------
         self.windowMenu = FrameSwitcher(self)
         menuBar.Append(self.windowMenu,
-                    _translate("Window"))
+                           _translate("&Window"))
 
         # ---_help---#000000#FFFFFF-------------------------------------------
         self.helpMenu = wx.Menu()
@@ -1892,6 +1848,25 @@ class CoderFrame(wx.Frame, ThemeMixin):
             if dlg.ShowModal() == wx.ID_YES:
                 self.fileBrowserWindow.gotoDir(cwdpath)
 
+    def onStartShellSession(self, event):
+        """Start a new Python session in the shell."""
+        if hasattr(self, 'shell'):
+            self.shell.start()
+            self.shell.SetFocus()
+
+    def onPushLineToShell(self, event):
+        """Push the currently selected line in the editor to the console and
+        run it.."""
+        if hasattr(self, 'shell'):
+            ed = self.currentDoc
+            if ed is None:  # no document selected
+                return
+
+            lineText, _ = ed.GetCurLine()
+            self.shell.clearAndReplaceTyped(lineText)
+            self.shell.submit(self.shell.getTyped())
+            ed.LineDown()
+
     def onSetCWDFromBrowserPane(self, event):
         """Set the current working directory by browsing for it."""
 
@@ -1988,24 +1963,12 @@ class CoderFrame(wx.Frame, ThemeMixin):
                 if self._lastCaretPos != pos:
                     self.currentDoc.OnUpdateUI(evt=None)
                     self._lastCaretPos = pos
-            last = self.fileStatusLastChecked
-            interval = self.fileStatusCheckInterval
-            if time.time() - last > interval and not self.showingReloadDialog:
-                if not self.expectedModTime(self.currentDoc):
-                    self.showingReloadDialog = True
-                    filename = os.path.basename(self.currentDoc.filename)
-                    msg = _translate("'%s' was modified outside of PsychoPy:\n\n"
-                                     "Reload (without saving)?") % filename
-                    dlg = dialogs.MessageDialog(self, message=msg, type='Warning')
-                    if dlg.ShowModal() == wx.ID_YES:
-                        self.statusBar.SetStatusText(_translate('Reloading file'))
-                        self.fileReload(event,
-                                        filename=self.currentDoc.filename,
-                                        checkSave=False)
-                    self.showingReloadDialog = False
-                    self.statusBar.SetStatusText('')
-                    dlg.Destroy()
-                self.fileStatusLastChecked = time.time()
+            # if file has been modified externally, show message
+            if (
+                time.time() - self.fileStatusLastChecked > self.fileStatusCheckInterval 
+                and not self.showingReloadDialog
+            ):
+                self.checkExternallyModified(event)
 
     def pageChanged(self, event):
         """Event called when the user switches between editor tabs."""
@@ -2032,53 +1995,70 @@ class CoderFrame(wx.Frame, ThemeMixin):
         self.currentDoc = self.notebook.GetPage(new)
         self.app.updateWindowMenu()
         self.setFileModified(self.currentDoc.UNSAVED)
-        self.SetLabel('%s - PsychoPy Coder' % self.currentDoc.filename)
+        self.setTitle(title=self.winTitle, document=self.currentDoc.filename)
 
         self.currentDoc.analyseScript()
 
         fileType = self.currentDoc.getFileType()
         # enable run buttons if current file is a Python script
-        if hasattr(self, 'cdrBtnRunner'):
+        if 'sendRunner' in self.ribbon.buttons:
             isExp = fileType == 'Python'
-            self.toolbar.EnableTool(self.cdrBtnRunner.Id, isExp)
-            self.toolbar.EnableTool(self.cdrBtnRun.Id, isExp)
+            self.ribbon.buttons['sendRunner'].Enable(isExp)
+            self.ribbon.buttons['pilotRunner'].Enable(isExp)
 
         self.statusBar.SetStatusText(fileType, 2)
-
-        # todo: reduce redundancy w.r.t OnIdle()
+        # check for external modified
+        self.checkExternallyModified(event)
+    
+    def checkExternallyModified(self, event=None):
+        """
+        Check whether the current file has been modified externally, and show a message dialog if 
+        so.
+        """
         if not self.expectedModTime(self.currentDoc):
+            self.showingReloadDialog = True
             filename = os.path.basename(self.currentDoc.filename)
             msg = _translate("'%s' was modified outside of PsychoPy:\n\n"
-                             "Reload (without saving)?") % filename
+                                "Reload (without saving)?") % filename
             dlg = dialogs.MessageDialog(self, message=msg, type='Warning')
-            if dlg.ShowModal() == wx.ID_YES:
+            dlg.Raise()
+            if dlg.ShowWindowModal() == wx.ID_YES:
                 self.statusBar.SetStatusText(_translate('Reloading file'))
                 self.fileReload(event,
                                 filename=self.currentDoc.filename,
                                 checkSave=False)
-                self.setFileModified(False)
+            self.showingReloadDialog = False
             self.statusBar.SetStatusText('')
             dlg.Destroy()
+        self.fileStatusLastChecked = time.time()
+        # Enable / disable save button
+        self.ribbon.buttons['save'].Enable(self.currentDoc.UNSAVED)
+        self.fileMenu.Enable(wx.ID_SAVE, self.currentDoc.UNSAVED)
 
     # def pluginManager(self, evt=None, value=True):
-    #     """Show the plugin manger frame."""
+    #     """Show the plugin manager frame."""
     #     PluginManagerFrame(self).ShowModal()
 
     def OnFindOpen(self, event):
-        # open the find dialog if not already open
-        if self.findDlg is not None:
-            return
         if not self.currentDoc:
+            # don't do anything if there's no document to search
             return
-        win = wx.Window.FindFocus()
-        self.findData.SetFindString(self.currentDoc.GetSelectedText())
-        self.findDlg = wx.FindReplaceDialog(win, self.findData, "Find",
-                                            wx.FR_NOWHOLEWORD)
-        self.findDlg.Bind(wx.EVT_FIND_CLOSE, self.OnFindClose)
-        self.findDlg.Show()
+        if self.findDlg is not None:
+            # if find dlg already exists, show it and give it focus
+            self.findDlg.Show()
+            self.findDlg.Raise()
+            self.findDlg.SetFocus()
+        else:
+            # if not, make one now
+            win = wx.Window.FindFocus()
+            self.findData.SetFindString(self.currentDoc.GetSelectedText())
+            self.findDlg = wx.FindReplaceDialog(win, self.findData, "Find",
+                                                wx.FR_NOWHOLEWORD)
+            self.findDlg.Bind(wx.EVT_FIND_CLOSE, self.OnFindClose)
+            self.findDlg.Show()
 
     def OnFindNext(self, event):
-        # find the next occurence of text according to last find dialogue data
+        # find the next occurrence of text according to last find dialogue data
         if not self.findData.GetFindString():
             self.OnFindOpen(event)
             return
@@ -2087,6 +2067,7 @@ class CoderFrame(wx.Frame, ThemeMixin):
         #     self.OnFindClose(None)
 
     def OnFindClose(self, event):
+        self.findDlg.Destroy()
         self.findDlg = None
 
     def OnFileHistory(self, evt=None):
@@ -2154,7 +2135,7 @@ class CoderFrame(wx.Frame, ThemeMixin):
                 and len(self.app.getAllFrames(frameType="runner")) == 0
                 and sys.platform != 'darwin'):
             if not self.app.quitting:
-                # send the event so it can be vetoed if neded
+                # send the event so it can be vetoed if needed
                 self.app.quit(event)
                 return  # app.quit() will have closed the frame already
 
@@ -2230,8 +2211,10 @@ class CoderFrame(wx.Frame, ThemeMixin):
             # give the user a chance to save his file.
             self.UNSAVED = True
 
-        if doc == self.currentDoc and hasattr(self, 'cdrBtnSave'):
-            self.cdrBtnSave.Enable(doc.UNSAVED)
+        if doc == self.currentDoc:
+            # Enable / disable save button
+            self.ribbon.buttons['save'].Enable(self.currentDoc.UNSAVED)
+            self.fileMenu.Enable(wx.ID_SAVE, self.currentDoc.UNSAVED)
 
         self.currentDoc.analyseScript()
 
@@ -2252,6 +2235,7 @@ class CoderFrame(wx.Frame, ThemeMixin):
         docID = self.findDocID(filename)
         readOnlyPref = 'readonly' in self.app.prefs.coder
         readonly = readOnlyPref and self.app.prefs.coder['readonly']
+        path, shortName = os.path.split(filename)
         if docID >= 0:
             self.currentDoc = self.notebook.GetPage(docID)
             self.notebook.SetSelection(docID)
@@ -2300,7 +2284,7 @@ class CoderFrame(wx.Frame, ThemeMixin):
                 self.fileHistory.AddFileToHistory(filename)
             else:
                 # set name for an untitled document
-                filename = 'untitled.py'
+                filename = shortName = 'untitled.py'
                 allFileNames = self.getOpenFilenames()
                 n = 1
                 while filename in allFileNames:
@@ -2308,11 +2292,10 @@ class CoderFrame(wx.Frame, ThemeMixin):
                     n += 1
 
                 # create modification time for in memory document
-                self.currentDoc.fileModTime = time.ctime()
+                self.currentDoc.fileModTime = time.time()
 
             self.currentDoc.EmptyUndoBuffer()
 
-            path, shortName = os.path.split(filename)
             self.notebook.AddPage(p, shortName)
             nbIndex = len(self.getOpenFilenames()) - 1
             if isinstance(self.notebook, wx.Notebook):
@@ -2328,20 +2311,16 @@ class CoderFrame(wx.Frame, ThemeMixin):
 
             fileType = self.currentDoc.getFileType()
 
-            # enable run buttons if current file is a Python script
-            if hasattr(self, 'cdrBtnRunner'):
-                isExp = fileType == 'Python'
-                self.toolbar.EnableTool(self.cdrBtnRunner.Id, isExp)
-                self.toolbar.EnableTool(self.cdrBtnRun.Id, isExp)
-
             # line wrapping
             self.currentDoc.SetWrapMode(
                 wx.stc.STC_WRAP_WORD if self.lineWrapChk.IsChecked() else wx.stc.STC_WRAP_NONE)
             self.statusBar.SetStatusText(fileType, 2)
         fname = Path(self.currentDoc.filename).name
-        self.SetLabel('%s - PsychoPy Coder (v%s)' % (fname, psychopy.__version__))
+        self.setTitle(title=self.winTitle, document=fname)
         #if len(self.getOpenFilenames()) > 0:
         self.currentDoc.analyseScript()
+        if os.path.isdir(path):
+            self.fileBrowserWindow.gotoDir(path)
 
         if not keepHidden:
             self.Show()  # if the user had closed the frame it might be hidden
@@ -2351,23 +2330,31 @@ class CoderFrame(wx.Frame, ThemeMixin):
         isExp = filename.endswith(".py") or filename.endswith(".psyexp")
 
         # if the toolbar is done then adjust buttons
-        if hasattr(self, 'cdrBtnRunner'):
-            self.toolbar.EnableTool(self.cdrBtnRunner.Id, isExp)
-            self.toolbar.EnableTool(self.cdrBtnRun.Id, isExp)
-        if 'pavloviaSync' in self.btnHandles:
-            self.toolbar.EnableTool(self.btnHandles['pavloviaSync'].Id, bool(self.filename))
+        for key in ("sendRunner", "pilotRunner", "pyrun", "pypilot"):
+            if key in self.ribbon.buttons:
+                self.ribbon.buttons[key].Enable(isExp)
+        # update save/saveas buttons
+        self.ribbon.buttons['save'].Enable(readonly and self.currentDoc.UNSAVED)
+        self.fileMenu.Enable(wx.ID_SAVE, readonly and self.currentDoc.UNSAVED)
+        self.ribbon.buttons['saveas'].Enable(bool(self.filename))
+        self.fileMenu.Enable(wx.ID_SAVEAS, bool(self.filename))
         # update menu items
         self.pavloviaMenu.syncBtn.Enable(bool(self.filename))
         self.pavloviaMenu.newBtn.Enable(bool(self.filename))
         self.app.updateWindowMenu()
+        self.fileBrowserWindow.updateFileBrowser()
+        # update pavlovia project
+        self.project = pavlovia.getProject(self.currentDoc.filename)
+        self.ribbon.buttons['pavproject'].updateInfo()
 
     def fileOpen(self, event=None, filename=None):
         if not filename:
             # get path of current file (empty if current file is '')
             if hasattr(self.currentDoc, 'filename'):
-                initPath = os.path.split(self.currentDoc.filename)[0]
+                initPath = str(Path(self.currentDoc.filename).parent)
             else:
-                initPath = ''
+                initPath = ""
+            # Open dlg
             dlg = wx.FileDialog(
                 self, message=_translate("Open file ..."),
                 defaultDir=initPath, style=wx.FD_OPEN
@@ -2400,14 +2387,12 @@ class CoderFrame(wx.Frame, ThemeMixin):
         if doc is None:
             return True  # we have no file loaded
         # files that don't exist DO have the expected mod-time
-        filename = doc.filename
-        if not os.path.exists(filename):
-            return True
-        if not os.path.isabs(filename):
+        filename = Path(doc.filename)
+        if not filename.is_file():
             return True
         actualModTime = os.path.getmtime(filename)
         expectedModTime = doc.fileModTime
-        if actualModTime != expectedModTime:
+        if abs(float(actualModTime) - float(expectedModTime)) > 1:
             msg = 'File %s modified outside of the Coder (IDE).' % filename
             print(msg)
             return False
@@ -2416,6 +2401,7 @@ class CoderFrame(wx.Frame, ThemeMixin):
     def fileSave(self, event=None, filename=None, doc=None):
         """Save a ``doc`` with a particular ``filename``.
         If ``doc`` is ``None`` then the current active doc is used.
+        If the current active doc is also ``None``, then quit early.
         If the ``filename`` is ``None`` then the ``doc``'s current filename
         is used or a dlg is presented to get a new filename.
         """
@@ -2424,6 +2410,8 @@ class CoderFrame(wx.Frame, ThemeMixin):
                 self.currentDoc.AutoCompCancel()
 
         if doc is None:
+            if self.currentDoc is None:
+                return
             doc = self.currentDoc
         if filename is None:
             filename = doc.filename
@@ -2529,7 +2517,8 @@ class CoderFrame(wx.Frame, ThemeMixin):
             self.currentDoc.analyseScript()
             # Update status bar and title bar labels
             self.statusBar.SetStatusText(self.currentDoc.getFileType(), 2)
-            self.SetLabel(f'{self.currentDoc.filename} - PsychoPy Coder')
+
+            self.setTitle(title=self.winTitle, document=self.currentDoc.filename)
 
         dlg.Destroy()
 
@@ -2572,15 +2561,20 @@ class CoderFrame(wx.Frame, ThemeMixin):
             self.statusBar.SetStatusText("", 1)  # clear line pos
             self.statusBar.SetStatusText("", 2)  # clear file type in status bar
             self.statusBar.SetStatusText("", 3)  # psyhcopy version
+            # set window title
+            self.setTitle(title=self.winTitle, document=self.currentDoc)
             # clear the source tree
-            self.SetLabel("PsychoPy v%s (Coder)" % self.app.version)
             self.structureWindow.srcTree.DeleteAllItems()
+            # disable save buttons
+            self.ribbon.buttons['save'].Disable()
+            self.ribbon.buttons['saveas'].Disable()
         else:
-            self.currentDoc = self.notebook.GetPage(newPageID)
+            self.setCurrentDoc(self.getOpenFilenames()[newPageID])
             self.structureWindow.refresh()
             # set to current file status
             self.setFileModified(self.currentDoc.UNSAVED)
-        # return 1
+        # update file browser buttons
+        self.fileBrowserWindow.updateFileBrowser()
 
     def fileCloseAll(self, event, checkSave=True):
         """Close all files open in the editor."""
@@ -2591,9 +2585,10 @@ class CoderFrame(wx.Frame, ThemeMixin):
         for fname in self.getOpenFilenames():
             self.fileClose(event, fname, checkSave)
 
-    def runFile(self, event=None):
-        """Open Runner for running the script."""
-
+    def sendToRunner(self, evt=None):
+        """
+        Send the current file to the Runner.
+        """
         fullPath = Path(self.currentDoc.filename)
         # does the file need saving before running?
         if self.currentDoc.UNSAVED or not fullPath.is_file():
@@ -2604,7 +2599,7 @@ class CoderFrame(wx.Frame, ThemeMixin):
             sys.stdout.flush()
             dlg.Destroy()
             if resp == wx.ID_CANCEL:
-                return -1  # return, don't run
+                return False  # return, don't run
             elif resp == wx.ID_YES:
                 self.fileSave(None)  # save then run
             elif resp == wx.ID_NO:
@@ -2613,39 +2608,80 @@ class CoderFrame(wx.Frame, ThemeMixin):
         if self.app.runner == None:
             self.app.showRunner()
         if fullPath.is_file():
-            self.app.runner.addTask(fileName=fullPath)
+            if self.ribbon.buttons['pyswitch'].mode:
+                runMode = "run"
+            else:
+                runMode = "pilot"
+            self.app.runner.addTask(fileName=fullPath, runMode=runMode)
         else:
             alert(code=6105, strFields={'path': str(fullPath)})
         self.app.runner.Raise()
-        if event:
-            if event.Id in [self.cdrBtnRun.Id, self.IDs.cdrRun]:
-                self.app.runner.panel.runLocal(event)
-                self.Raise()
-            else:
-                self.app.showRunner()
+        self.app.showRunner()
 
-    def copy(self, event):
-        foc = self.FindFocus()
-        foc.Copy()
-        if isinstance(foc, CodeEditor):
-            self.currentDoc.Copy()  # let the text ctrl handle this
-        # elif isinstance(foc, StdOutRich):
+        return True
+
+    def onRunShortcut(self, evt=None):
+        """
+        Callback for when the run shortcut is pressed - will either run or pilot 
+        depending on run mode
+        """
+        if self.currentDoc is None:
+            return
+
+        # run/pilot according to mode
+        if self.ribbon.buttons['pyswitch'].mode:
+            self.runFile(evt)
+        else:
+            self.pilotFile(evt)
+
+    def runFile(self, event=None):
+        """
+        Send the current file to the Runner and run it.
+        """
+        if self.currentDoc is None:  # do nothing if no file is present
+            return
+
+        if self.sendToRunner(event):
+            self.app.runner.panel.runLocal(event, focusOnExit='coder')
+            self.Raise()
+
+    def pilotFile(self, event=None):
+        if self.currentDoc is None:
+            return
+
+        if self.sendToRunner(event):
+            self.app.runner.panel.pilotLocal(event, focusOnExit='coder')
+            self.Raise()
 
     def duplicateLine(self, event):
+        """Duplicate the current line."""
         self.currentDoc.LineDuplicate()
 
-    def cut(self, event):
+    def copy(self, event):
+        """Copy text to the clipboard from the focused widget."""
         foc = self.FindFocus()
-        foc.Copy()
         if isinstance(foc, CodeEditor):
-            self.currentDoc.Cut()  # let the text ctrl handle this
+            self.currentDoc.Copy()  # let the text ctrl handle this
+        elif hasattr(foc, 'Copy'):  # handle any other widget
+            foc.Copy()
+
+    def cut(self, event):
+        """Cut text from the focused widget to clipboard."""
+        foc = self.FindFocus()
+        if isinstance(foc, CodeEditor):
+            self.currentDoc.Cut()
             self.currentDoc.analyseScript()
+        elif hasattr(foc, 'Cut'):
+            foc.Cut()
 
     def paste(self, event):
+        """Paste text from the clipboard to the focused object."""
         foc = self.FindFocus()
-        if hasattr(foc, 'Paste'):
-            foc.Paste()
+        if isinstance(foc, CodeEditor):
+            self.currentDoc.Paste()
             self.currentDoc.analyseScript()
+        elif hasattr(foc, 'Paste'):
+            foc.Paste()
 
     def undo(self, event):
         if self.currentDoc:
@@ -2697,8 +2733,11 @@ class CoderFrame(wx.Frame, ThemeMixin):
             # hide the pane
             self.prefs['showOutput'] = False
             self.paneManager.GetPane('Shelf').Hide()
-        self.app.prefs.saveUserPrefs()  # includes a validation
-        self.paneManager.Update()
+        self.app.prefs.saveUserPrefs()
+        try:  # includes a validation
+            self.paneManager.Update()
+        except wxAssertionError as err:
+            logging.warn("Exception caught: " + str(err))
 
     def setShowIndentGuides(self, event):
         # show/hide the source assistant (from the view menu control)
@@ -2785,19 +2824,17 @@ class CoderFrame(wx.Frame, ThemeMixin):
     def setFileModified(self, isModified):
         # changes the document flag, updates save buttons
         self.currentDoc.UNSAVED = isModified
-        # disabled when not modified
-        if hasattr(self, 'cdrBtnSave'):
-            self.cdrBtnSave.Enable(isModified)
-        # self.fileMenu.Enable(self.fileMenu.FindItem('&Save\tCtrl+S"'),
-        #     isModified)
+        # Enable / disable save button
+        self.ribbon.buttons['save'].Enable(self.currentDoc.UNSAVED)
+        self.fileMenu.Enable(wx.ID_SAVE, self.currentDoc.UNSAVED)
 
     def onProcessEnded(self, event):
         # this is will check the stdout and stderr for any last messages
         self.onIdle(event=None)
         self.scriptProcess = None
         self.scriptProcessID = None
-        self.toolbar.EnableTool(self.cdrBtnRun.Id, True)
-        self.toolbar.EnableTool(self.cdrBtnRunner.Id, True)
+        self.ribbon.buttons['sendRunner'].Enable(True)
+        self.ribbon.buttons['pilotRunner'].Enable(True)
 
     def onURL(self, evt):
         """decompose the URL of a file and line number"""
@@ -2818,18 +2855,20 @@ class CoderFrame(wx.Frame, ThemeMixin):
             self.unitTestFrame = UnitTestFrame(app=self.app)
         # UnitTestFrame.Show()
 
+    def openPluginManager(self, evt=None):
+        dlg = psychopy.app.plugin_manager.dialog.EnvironmentManagerDlg(self)
+        dlg.Show()
+        # Do post-close checks
+        dlg.onClose()
+
     def onPavloviaSync(self, evt=None):
         """Push changes to project repo, or create new proj if proj is None"""
         self.project = pavlovia.getProject(self.currentDoc.filename)
         self.fileSave(self.currentDoc.filename)  # Must save on sync else changes not pushed
-        pavlovia_ui.syncProject(parent=self, project=self.project)
+        pavlovia_ui.syncProject(parent=self, file=self.currentDoc.filename, project=self.project)
 
     def onPavloviaRun(self, evt=None):
         # TODO: Allow user to run project from coder
-        pass
-
-    def setPavloviaUser(self, user):
-        # TODO: update user icon on button to user avatar
         pass
 
     def resetPrefs(self, event):
@@ -2857,17 +2896,194 @@ class CoderFrame(wx.Frame, ThemeMixin):
         else:
             pass
 
-    def _applyAppTheme(self, target=None):
-        """Overrides theme change from ThemeMixin.
-        Don't call - this is called at the end of theme.setter"""
-        ThemeMixin._applyAppTheme(self)  # handles most recursive setting
-        ThemeMixin._applyAppTheme(self.toolbar)
-        ThemeMixin._applyAppTheme(self.statusBar)
-        # updating sourceAsst will incl fileBrowser and sourcetree
-        ThemeMixin._applyAppTheme(self.sourceAsst)
-        ThemeMixin._applyAppTheme(self.notebook)
-        self.notebook.Refresh()
-        if hasattr(self, 'shelf'):
-            ThemeMixin._applyAppTheme(self.shelf)
-        if sys.platform == 'win32':
-            self.Update()  # kills mac. Not sure about linux
+
+class StyledNotebook(aui.AuiNotebook, handlers.ThemeMixin):
+    """
+    Exactly the same as an aui.AuiNotebook, but with methods from handlers.ThemeMixin
+    """
+    pass
+
+
+class CoderRibbon(ribbon.FrameRibbon):
+    def __init__(self, parent):
+        # initialize
+        ribbon.FrameRibbon.__init__(self, parent)
+
+        # --- File ---
+        self.addSection(
+            "file", label=_translate("File"), icon="file"
+        )
+        # file new
+        self.addButton(
+            section="file", name="new", label=_translate("New"), icon="filenew",
+            tooltip=_translate("Create new text file"),
+            callback=parent.fileNew
+        )
+        # file open
+        self.addButton(
+            section="file", name="open", label=_translate("Open"), icon="fileopen",
+            tooltip=_translate("Open an existing text file"),
+            callback=parent.fileOpen
+        )
+        # file save
+        self.addButton(
+            section="file", name="save", label=_translate("Save"), icon="filesave",
+            tooltip=_translate("Save current text file"),
+            callback=parent.fileSave
+        ).Disable()
+        # file save as
+        self.addButton(
+            section="file", name="saveas", label=_translate("Save as..."), icon="filesaveas",
+            tooltip=_translate("Save current text file as..."),
+            callback=parent.fileSaveAs
+        ).Disable()
+
+        self.addSeparator()
+
+        # --- Edit ---
+        self.addSection(
+            "edit", label=_translate("Edit"), icon="edit"
+        )
+        # undo
+        self.addButton(
+            section="edit", name="undo", label=_translate("Undo"), icon="undo",
+            tooltip=_translate("Undo last action"),
+            callback=parent.undo
+        )
+        # redo
+        self.addButton(
+            section="edit", name="redo", label=_translate("Redo"), icon="redo",
+            tooltip=_translate("Redo last action"),
+            callback=parent.redo
+        )
+        # find
+        self.addButton(
+            section="edit", name="find", label=_translate("Find"), icon="find",
+            tooltip=_translate("Search the current file for a specific term"),
+            callback=parent.OnFindNext
+        )
+
+        self.addSeparator()
+
+        # --- Tools ---
+        self.addSection(
+            "experiment", label=_translate("Experiment"), icon="experiment"
+        )
+        # settings
+        self.addButton(
+            section="experiment", name='color', label=_translate('Color picker'), icon="color",
+            tooltip=_translate("Open a tool for choosing colors"),
+            callback=parent.app.colorPicker
+        )
+        # switch run/pilot
+        runPilotSwitch = self.addSwitchCtrl(
+            section="experiment", name="pyswitch",
+            labels=(_translate("Pilot"), _translate("Run")),
+            style=wx.HORIZONTAL
+        )
+        # send to runner
+        self.addButton(
+            section="experiment", name='sendRunner', label=_translate('Runner'), icon="runner",
+            tooltip=_translate("Send experiment to Runner"),
+            callback=parent.sendToRunner
+        ).Disable()
+        # send to runner (pilot icon)
+        self.addButton(
+            section="experiment", name='pilotRunner', label=_translate('Runner'),
+            icon="runnerPilot",
+            tooltip=_translate("Send experiment to Runner"),
+            callback=parent.sendToRunner
+        ).Disable()
+        # link runner buttons to switch
+        runPilotSwitch.addDependant(self.buttons['sendRunner'], mode=1, action="show")
+        runPilotSwitch.addDependant(self.buttons['pilotRunner'], mode=0, action="show")
+
+        self.addSeparator()
+
+        # --- Python ---
+        self.addSection(name="py", label=_translate("Desktop"), icon="desktop")
+
+        # monitor center
+        self.addButton(
+            section="py", name='monitor', label=_translate('Monitor center'), icon="monitors",
+            tooltip=_translate("Monitor settings and calibration"),
+            callback=parent.app.openMonitorCenter
+        )
+        # pilot Py
+        self.addButton(
+            section="py", name="pypilot", label=_translate("Pilot"), icon='pyPilot',
+            tooltip=_translate("Run the current script in Python with piloting features on"),
+            callback=parent.pilotFile
+        ).Disable()
+        # run Py
+        self.addButton(
+            section="py", name="pyrun", label=_translate("Run"), icon='pyRun',
+            tooltip=_translate("Run the current script in Python"),
+            callback=parent.runFile
+        ).Disable()
+        # link run buttons to switch
+        runPilotSwitch.addDependant(self.buttons['pyrun'], mode=1, action="show")
+        runPilotSwitch.addDependant(self.buttons['pypilot'], mode=0, action="show")
+
+        self.addSeparator()
+
+        # --- Browser ---
+        self.addSection(
+            name="browser", label=_translate("Browser"), icon="browser"
+        )
+
+        # sync project
+        self.addButton(
+            section="browser", name="pavsync", label=_translate("Sync"), icon='pavsync',
+            tooltip=_translate("Sync project with Pavlovia"),
+            callback=parent.onPavloviaSync
+        )
+
+        self.addSeparator()
+
+        # --- Pavlovia ---
+        self.addSection(
+            name="pavlovia", label=_translate("Pavlovia"), icon="pavlovia"
+        )
+        # pavlovia user
+        self.addPavloviaUserCtrl(
+            section="pavlovia", name="pavuser", frame=parent
+        )
+        # pavlovia project
+        self.addPavloviaProjectCtrl(
+            section="pavlovia", name="pavproject", frame=parent
+        )
+
+        self.addSeparator()
+
+        # --- Plugin sections ---
+        self.addPluginSections("psychopy.app.builder")
+
+        # --- Views ---
+        self.addStretchSpacer()
+        self.addSeparator()
+
+        self.addSection(
+            "views", label=_translate("Views"), icon="windows"
+        )
+        # show Builder
+        self.addButton(
+            section="views", name="builder", label=_translate("Show Builder"), icon="showBuilder",
+            tooltip=_translate("Switch to Builder view"),
+            callback=parent.app.showBuilder
+        )
+        # show Coder
+        self.addButton(
+            section="views", name="coder", label=_translate("Show Coder"), icon="showCoder",
+            tooltip=_translate("Switch to Coder view"),
+            callback=parent.app.showCoder
+        ).Disable()
+        # show Runner
+        self.addButton(
+            section="views", name="runner", label=_translate("Show Runner"), icon="showRunner",
+            tooltip=_translate("Switch to Runner view"),
+            callback=parent.app.showRunner
+        )
+
+        # start off in run mode
+        runPilotSwitch.setMode(1)

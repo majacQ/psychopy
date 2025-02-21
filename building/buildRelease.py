@@ -10,15 +10,8 @@
     It should be run from the root of the main git repository, which should be
     next to a clone of the psychopy/versions git repository
 """
-from __future__ import print_function
-from __future__ import division
-from __future__ import absolute_import
-
-from builtins import input
 import os, sys, shutil, subprocess
 from os.path import join
-from createInitFile import createInitFile
-from psychopy.constants import PY3
 from pathlib import Path
 
 # MAIN is the root of the psychopy repo
@@ -38,15 +31,14 @@ else:
           "like `du -sck` to work)")
     sys.exit()
 
+
 def getSHA(cwd='.'):
     if cwd == '.':
         cwd = os.getcwd()
     # get the SHA of the git HEAD
     SHA_string = subprocess.check_output(
         ['git', 'rev-parse', '--short', 'HEAD'],
-        cwd=cwd).split()[0]
-    if PY3:
-        SHA_string = SHA_string.decode('utf-8')
+        cwd=cwd).split()[0].decode('utf-8')
 
     # convert to hex from a string and return it
     print('SHA:', SHA_string, 'for repo:', cwd)
@@ -54,14 +46,15 @@ def getSHA(cwd='.'):
 
 
 def buildRelease(versionStr, noCommit=False, interactive=True):
-    #
-    createInitFile(dist='sdist', version=versionStr, sha=getSHA())
-    dest = join(VERSIONS, "psychopy")
+    dest = VERSIONS / "psychopy"
     shutil.rmtree(dest)
     ignores = shutil.ignore_patterns("demos", "docs", "tests", "pylink",
                                      "*.pyo", "*.pyc", "*.orig", "*.bak",
                                      ".DS_Store", ".coverage")
     shutil.copytree("psychopy", dest, symlinks=False, ignore=ignores)
+    os.mkdir(dest/'tests')
+    shutil.copyfile("psychopy/tests/__init__.py", dest/'tests/__init__.py')
+    shutil.copyfile("psychopy/tests/utils.py", dest/'tests/utils.py')
 
     # todo: would be nice to check here that we didn't accidentally add anything large (check new folder size)
     Mb = float(subprocess.check_output(["du", "-sck", dest]).split()[0])/10**3
@@ -100,12 +93,6 @@ def buildRelease(versionStr, noCommit=False, interactive=True):
     output = subprocess.check_output(["git", "push", "origin", "%s" % versionStr],
                          cwd=VERSIONS)
     print(output)
-
-    # revert the __init__ file to non-ditribution state
-    print('reverting the main master branch: git checkout HEAD psychopy/__init__.py ')
-    print(subprocess.check_output(
-         ["git", "checkout", "HEAD", "psychopy/__init__.py"],
-         cwd=MAIN))
     return True  # success
 
 

@@ -10,7 +10,7 @@ eyetracker.hw.mouse.EyeTracker:
         sampling_rate: 50
         track_eyes: RIGHT_EYE
     controls:
-        move: RIGHT_BUTTON
+        move: []
         blink: [LEFT_BUTTON, RIGHT_BUTTON]
         saccade_threshold: 0.5
     monitor_event_types: [MonocularEyeSampleEvent, FixationStartEvent, FixationEndEvent, SaccadeStartEvent, SaccadeEndEvent, BlinkStartEvent, BlinkEndEvent]
@@ -19,7 +19,7 @@ eyetracker.hw.mouse.EyeTracker:
         # target_duration is the number of sec that a calibration point should
         # be displayed before moving onto the next point. Target size expansion / contraction
         # optionally occurs during this time period as well.
-        target_duration: 1.5
+        target_duration: 2.5
 
         # target_delay specifies the time between target position presentations.
         # Target position animation optionally occurs during this time period as well.
@@ -44,9 +44,18 @@ eyetracker.hw.mouse.EyeTracker:
         # Should the target positions be randomized?
         randomize: True
 
-        # screen_background_color specifies the r,g,b background color to
-        # set the calibration, validation, etc, screens to.
+        # screen_background_color specifies the background color to
+        # set the calibration screens to.
         screen_background_color: [128,128,128]
+
+        # text_color specifies the foreground color of any text used during calibration.
+        # If empty, text_color is calculated automatically based on screen_background_color.
+        text_color:
+
+        # target_type: Defines what form of calibration graphic should be used
+        #   during calibration, validation, etc. Valid options are CIRCLE_TARGET, or CUSTOM.
+        #
+        target_type: CIRCLE_TARGET
 
         # The associated target attribute properties can be supplied
         # for the given target_type.

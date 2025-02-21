@@ -1,6 +1,13 @@
 :class:`TextBox`
 -----------------
 
+.. warning::
+
+    TextBox is deprecated. Please use :class:`~psychopy.visual.TextBox2` instead which supports similar
+    editable high-performance rendering of text but also supports non-monospaced
+    fonts and a wider range of formatting and alignment options. This is a lazy-imported class, therefore
+    import using full path `from psychopy.visual.textbox import TextBox` when inheriting from it.
+
 Attributes
 ==========
 
@@ -17,7 +24,6 @@ attributes:**
 
     TextBox.setText
     TextBox.setPosition
-    TextBox.setOri
     TextBox.setHorzAlign
     TextBox.setVertAlign
     TextBox.setHorzJust

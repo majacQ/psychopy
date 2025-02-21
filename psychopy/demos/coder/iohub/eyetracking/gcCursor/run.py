@@ -12,7 +12,7 @@ configuration dict for the eye tracker being used to modify it's settings.
 from psychopy import core, visual
 from psychopy.data import TrialHandler, importConditions
 from psychopy.iohub import launchHubServer
-from psychopy.iohub.util import getCurrentDateTimeString
+from psychopy.iohub.util import getCurrentDateTimeString, hideWindow, showWindow
 import os
 
 # Eye tracker to use ('mouse', 'eyelink', 'gazepoint', or 'tobii')
@@ -156,17 +156,13 @@ if __name__ == "__main__":
     display = io_hub.devices.display
     kb = io_hub.devices.keyboard
 
-    # Start by running the eye tracker default setup / calibration.
-    #
-    window.winHandle.minimize()  # minimize the PsychoPy window
-    window.winHandle.set_fullscreen(False)
-
-    # run eyetracker calibration
-    cal_result = tracker.runSetupProcedure()
-    print("Calibration returned: ", cal_result)
-
-    window.winHandle.set_fullscreen(True)
-    window.winHandle.maximize()  # maximize the PsychoPy window
+    # Minimize the PsychoPy window if needed
+    hideWindow(window)
+    # Display calibration gfx window and run calibration.
+    result = tracker.runSetupProcedure()
+    print("Calibration returned: ", result)
+    # Maximize the PsychoPy window if needed
+    showWindow(window)
 
     flip_time = window.flip()
     io_hub.sendMessageEvent(text="EXPERIMENT_START", sec_time=flip_time)
@@ -198,8 +194,7 @@ if __name__ == "__main__":
         instuction_text = "Press Space Key To Start Trial %d" % t
         instructions_text_stim.setText(instuction_text)
         instructions_text_stim.draw()
-        flip_time = window.flip()
-        io_hub.sendMessageEvent(text="EXPERIMENT_START", sec_time=flip_time)
+        window.flip()
 
         # Wait until a space key press event occurs after the
         # start trial instuctions have been displayed.
@@ -214,11 +209,6 @@ if __name__ == "__main__":
 
         trial['session_id'] = io_hub.getSessionID()
         trial['trial_id'] = t+1
-
-        # Send a msg to the ioHub indicating that the trial started, and the time of
-        # the first retrace displaying the trial stm.
-        #
-        io_hub.sendMessageEvent(text="TRIAL_START", sec_time=flip_time)
 
         # Start Recording Eye Data
         #
@@ -291,7 +281,7 @@ if __name__ == "__main__":
         #
         flip_time = window.flip()
         trial['TRIAL_END'] = flip_time
-        io_hub.sendMessageEvent(text="TRIAL_END %d" % t, sec_time=flip_time)
+        io_hub.sendMessageEvent(text="TRIAL_END", sec_time=flip_time)
 
         # Stop recording eye data.
         # In this example, we have no use for any eye data

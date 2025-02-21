@@ -7,35 +7,38 @@
 # Copyright (C) 2015 Jonathan Peirce
 # Distributed under the terms of the GNU General Public License (GPL).
 
-from __future__ import absolute_import, division, print_function
+
+
 
 import copy
 import numpy as np
 
-from psychopy import core, logging, event
-from .basevisual import MinimalStim, ColorMixin, BaseVisualStim
+from psychopy import core, logging, event, layout
+from psychopy.tools import arraytools, stimulustools as stt
+from .basevisual import MinimalStim, WindowMixin, ColorMixin, BaseVisualStim
 from .rect import Rect
 from .grating import GratingStim
 from .elementarray import ElementArrayStim
 from .circle import Circle
 from .shape import ShapeStim
-from .text import TextStim
+from . import TextBox2
 from ..tools.attributetools import logAttrib, setAttribute, attributeSetter
 from ..constants import FINISHED, STARTED, NOT_STARTED
 
+# Set to True to make borders visible for debugging
+debug = False
 
-
-class Slider(MinimalStim, ColorMixin):
+class Slider(MinimalStim, WindowMixin, ColorMixin):
     """A class for obtaining ratings, e.g., on a 1-to-7 or categorical scale.
 
     A simpler alternative to RatingScale, to be customised with code rather
     than with arguments.
 
-    A RatingScale instance is a re-usable visual object having a ``draw()``
+    A Slider instance is a re-usable visual object having a ``draw()``
     method, with customizable appearance and response options. ``draw()``
     displays the rating scale, handles the subject's mouse or key responses,
-    and updates the display. When the subject accepts a selection,
-    ``.noResponse`` goes ``False`` (i.e., there is a response).
+    and updates the display. As soon as a rating is supplied, ``.rating``
+	will go from ``None`` to selected item
 
     You can call the ``getRating()`` method anytime to get a rating,
     ``getRT()`` to get the decision time, or ``getHistory()`` to obtain
@@ -51,16 +54,18 @@ class Slider(MinimalStim, ColorMixin):
                  win,
                  ticks=(1, 2, 3, 4, 5),
                  labels=None,
-                 pos=None,
+                 startValue=None,
+                 pos=(0, 0),
                  size=None,
                  units=None,
                  flip=False,
+                 ori=0,
                  style='rating', styleTweaks=[],
                  granularity=0,
                  readOnly=False,
-                 color='White',
-                 fillColor='Red',
-                 borderColor='White',
+                 labelColor='White',
+                 markerColor='Red',
+                 lineColor='White',
                  colorSpace='rgb',
                  opacity=None,
                  font='Helvetica Bold',
@@ -69,7 +74,11 @@ class Slider(MinimalStim, ColorMixin):
                  labelHeight=None,
                  labelWrapWidth=None,
                  autoDraw=False,
-                 autoLog=True):
+                 autoLog=True,
+                 # Synonyms
+                 color=False,
+                 fillColor=False,
+                 borderColor=False):
         """
 
         Parameters
@@ -77,50 +86,110 @@ class Slider(MinimalStim, ColorMixin):
         win : psychopy.visual.Window
             Into which the scale will be rendered
 
-        ticks : list or tuple
+        ticks : list or tuple, optional
             A set of values for tick locations. If given a list of numbers then
             these determine the locations of the ticks (the first and last
             determine the endpoints and the rest are spaced according to
             their values between these endpoints.
 
-        labels : a list or tuple
+        labels : a list or tuple, optional
             The text to go with each tick (or spaced evenly across the ticks).
             If you give 3 labels but 5 tick locations then the end and middle
             ticks will be given labels. If the labels can't be distributed
             across the ticks then an error will be raised. If you want an
             uneven distribution you should include a list matching the length
             of ticks but with some values set to None
-
-        pos : XY pair (tuple, array or list)
+			
+        startValue : int or float, optional
+            The initial position of the marker on the slider. If not specified,
+            the marker will start at the mid-point of the scale.
+			
+        pos : tuple, list, or array, optional
+            The (x, y) position of the slider on the screen.
 
         size : w,h pair (tuple, array or list)
             The size for the scale defines the area taken up by the line and
             the ticks.
             This also controls whether the scale is horizontal or vertical.
 
-        units : the units to interpret the pos and size
+        units : str, optional
+            The units to interpret the `pos` and `size` parameters. Can be any
+            of the standard PsychoPy units (e.g., 'pix', 'cm', 'norm').
 
-        flip : bool
-            By default the labels will be below or left of the line. This
-            puts them above (or right)
-
+        flip : bool, optional
+            If `True`, the labels will be placed above (for horizontal sliders)
+            or to the right (for vertical sliders) of the slider line. Default
+            is `False`.
+			
+        ori : int or float, optional
+            The orientation of the slider in degrees. A value of 0 means no
+            rotation, positive values rotate the slider clockwise.
+			
+		style : str or list of str, optional
+            The style of the slider, e.g., 'rating', 'slider', 'radio'. Multiple
+            styles can be combined in a list.
+			
+		styleTweaks : list of str, optional
+            Additional styling tweaks, e.g., 'triangleMarker', 'labels45'.	
+			
         granularity : int or float
             The smallest valid increments for the scale. 0 gives a continuous
             (e.g. "VAS") scale. 1 gives a traditional likert scale. Something
             like 0.1 gives a limited fine-grained scale.
 
-        color :
-            Color of the line/ticks/labels according to the color space
+        readOnly : bool, optional
+            If `True`, the slider is displayed but does not accept input.
 
-        font : font name
+        labelColor : color, optional
+            The color of the labels in the specified color space.
 
-        autodraw :
+        markerColor : color, optional
+            The color of the marker in the specified color space.
 
-        depth :
+        lineColor : color, optional
+            The color of the slider line and ticks in the specified color space.
 
-        name :
+        colorSpace : str, optional
+            The color space for defining `labelColor`, `markerColor`, and
+            `lineColor` (e.g., 'rgb', 'rgb255', 'hex').
 
-        autoLog :
+        opacity : float, optional
+            The opacity of the slider, ranging from 0 (completely transparent)
+            to 1 (completely opaque).
+
+        font : str, optional
+            The font used for the labels.
+
+        depth : int, optional
+            The depth layer for rendering. Layers with lower numbers are rendered
+            first (behind).
+
+        name : str, optional
+            An optional name for the slider, useful for logging.
+
+        labelHeight : float, optional
+            The height of the label text. If `None`, a default value based on
+            the slider size is used.
+
+        labelWrapWidth : float, optional
+            The maximum width for text labels before wrapping. If `None`, labels
+            are not wrapped.
+
+        autoDraw : bool, optional
+            If `True`, the slider will be automatically drawn every frame.
+
+        autoLog : bool, optional
+            If `True`, a log message is automatically generated each time the
+            slider is updated. This can be useful for debugging or analysis.
+
+        color : color, optional
+            Synonym for `labelColor`.
+
+        fillColor : color, optional
+            Synonym for `markerColor`.
+
+        borderColor : color, optional
+            Synonym for `lineColor`.
         """
         # what local vars are defined (these are the init params) for use by
         # __repr__
@@ -128,38 +197,32 @@ class Slider(MinimalStim, ColorMixin):
         super(Slider, self).__init__(name=name, autoLog=False)
 
         self.win = win
-        self.ticks = np.asarray(ticks)
+        if ticks is None:
+            self.ticks = None
+        else:
+            self.ticks = np.array(ticks)
         self.labels = labels
-
-        if pos is None:
-            self.__dict__['pos'] = (0, 0)
-        else:
-            self.__dict__['pos'] = pos
-
-        if units is None:
-            self.units = win.units
-        else:
-            self.units = units
-
+        # Set pos and size via base method as objects don't yet exist to layout
+        self.units = units
+        WindowMixin.pos.fset(self, pos)
         if size is None:
-            defaultSizes = {
-                None: [self.win.size[0]*1.0, self.win.size[1]*0.1],
-                'height': [1.0, 0.1],
-                'norm': [1.0, 0.1],
-                'deg': [3.14, 0.314],
-                'cm': [10, 1],
-                'pix': [self.win.size[0]*1.0, self.win.size[1]*0.1]
-            }
-            self._size = defaultSizes[self.units]
-        else:
-            self._size = size
+            size = layout.Size((1, 0.1), 'height', self.win)
+        WindowMixin.size.fset(self, size)
+        # Set multiplier and additions to each component's size
+        self._markerSizeMultiplier = (1, 1)
+        self._markerSizeAddition = (0, 0)
+        self._lineSizeMultiplier = (1, 1)
+        self._lineSizeAddition = (0, 0)
+        self._tickSizeMultiplier = (1, 1)
+        self._tickSizeAddition = (0, 0)
+        # Allow styles to force alignment/anchor for labels
+        self._forceLabelAnchor = None
 
-        self.flip = flip
         self.granularity = granularity
         self.colorSpace = colorSpace
-        self.color = color
-        self.fillColor = fillColor
-        self.borderColor = borderColor
+        self.color = color if color is not False else labelColor
+        self.fillColor = fillColor if fillColor is not False else markerColor
+        self.borderColor = borderColor if borderColor is not False else lineColor
         self.opacity = opacity
         self.font = font
         self.autoDraw = autoDraw
@@ -167,30 +230,33 @@ class Slider(MinimalStim, ColorMixin):
         self.name = name
         self.autoLog = autoLog
         self.readOnly = readOnly
+        self.ori = ori
+        self.flip = flip
 
-        self.categorical = False  # will become True if no ticks set only labels
-        self.rating = None  # current value (from a response)
-        self.markerPos = None  # current value (maybe not from a response)
         self.rt = None
         self.history = []
         self.marker = None
         self.line = None
-        self.tickLines = []
-        self.tickLocs = None
-        self.labelLocs = None
+        self.tickLines = None
         self.labelWrapWidth = labelWrapWidth
-        self.labelHeight = labelHeight or min(self._size)
-        self._lineAspectRatio = 0.01
+        self.labelHeight = labelHeight or min(self.size) / 2
         self._updateMarkerPos = True
         self._dragging = False
-        self.mouse = event.Mouse()
+        self.mouse = event.Mouse(win=win)
         self._mouseStateClick = None  # so we can rule out long click probs
         self._mouseStateXY = None  # so we can rule out long click probs
 
         self.validArea = None
+        # Create elements
         self._createElements()
+        self.styleTweaks = []
+        self.style = style
+        self.styleTweaks += styleTweaks
+        self._layout()
         # some things must wait until elements created
         self.contrast = 1.0
+
+        self.startValue = self.markerPos = startValue
 
         # set autoLog (now that params have been initialised)
         self.autoLog = autoLog
@@ -199,59 +265,153 @@ class Slider(MinimalStim, ColorMixin):
         self.status = NOT_STARTED
         self.responseClock = core.Clock()
 
-        # set the style when everything else is set
-        self.styleTweaks = []
-        self.style = style
-        self.styleTweaks += styleTweaks
-
     def __repr__(self, complete=False):
         return self.__str__(complete=complete)  # from MinimalStim
-
-    @property
-    def _lineL(self):
-        """The length of the line (in the size units)
-        """
-        return max(self.size)
 
     @property
     def _tickL(self):
         """The length of the line (in the size units)
         """
-        return min(self.size)
+        return min(self.extent)
 
     @property
-    def _lineW(self):
-        """The length of the line (in the size units)
-        """
-        return max(self.size) * self._lineAspectRatio
+    def units(self):
+        return WindowMixin.units.fget(self)
+
+    @units.setter
+    def units(self, value):
+        WindowMixin.units.fset(self, value)
+        if hasattr(self, "line"):
+            self.line.units = value
+        if hasattr(self, "marker"):
+            self.marker.units = value
+        if hasattr(self, "tickLines"):
+            self.tickLines.units = value
+        if hasattr(self, "labelObjs"):
+            for label in self.labelObjs:
+                label.units = value
+        if hasattr(self, "validArea"):
+            self.validArea.units = value
+
+    @property
+    def pos(self):
+        return WindowMixin.pos.fget(self)
+
+    @pos.setter
+    def pos(self, value):
+        WindowMixin.pos.fset(self, value)
+        self._layout()
+
+    def setPos(self, newPos, operation='', log=None):
+        BaseVisualStim.setPos(self, newPos, operation=operation, log=log)
+
+    def setOri(self, newOri, operation='', log=None):
+        BaseVisualStim.setOri(self, newOri, operation=operation, log=log)
+
+    @property
+    def size(self):
+        return WindowMixin.size.fget(self)
+
+    @size.setter
+    def size(self, value):
+        WindowMixin.size.fset(self, value)
+        self._layout()
+
+    def setSize(self, newSize, operation='', units=None, log=None):
+        BaseVisualStim.setSize(self, newSize, operation=operation, units=units, log=log)
 
     @property
     def horiz(self):
         """(readonly) determines from self.size whether the scale is horizontal"""
-        return self.size[0] > self.size[1]
+        return self.extent[0] > self.extent[1]
 
     @property
-    def size(self):
-        """The size for the scale defines the area taken up by the line and
-            the ticks.
+    def categorical(self):
+        """(readonly) determines from labels and ticks whether the slider is categorical"""
+        return self.ticks is None or self.style == "radio"
+
+    @property
+    def extent(self):
         """
-        return self._size
+        The distance from the leftmost point on the slider to the rightmost point, and from the highest
+        point to the lowest.
+        """
+        # Get orientation (theta) and inverse orientation (atheta) in radans
+        theta = np.radians(self.ori)
+        atheta = np.radians(90-self.ori)
+        # Calculate adjacent sides to get vertical extent
+        A1 = abs(np.cos(theta) * self.size[1])
+        A2 = abs(np.cos(atheta) * self.size[0])
+        # Calculate opposite sides to get horizontal extent
+        O1 = abs(np.sin(theta) * self.size[1])
+        O2 = abs(np.sin(atheta) * self.size[0])
+        # Return extent
+        return O1 + O2, A1 + A2
+
+    @extent.setter
+    def extent(self, value):
+        self._extent = layout.Size(self.extent, self.units, self.win)
+
+    @property
+    def flip(self):
+        if hasattr(self, "_flip"):
+            return self._flip
+
+    @flip.setter
+    def flip(self, value):
+        self._flip = value
 
     @property
     def opacity(self):
         BaseVisualStim.opacity.fget(self)
+
     @opacity.setter
     def opacity(self, value):
         BaseVisualStim.opacity.fset(self, value)
         self.fillColor = self._fillColor.copy()
         self.borderColor = self._borderColor.copy()
         self.foreColor = self._foreColor.copy()
-    def setOpacity(self, value):
-        self.opacity = value
+
+    def setOpacity(self, newOpacity, operation='', log=None):
+        BaseVisualStim.setOpacity(self, newOpacity, operation=operation, log=log)
+
+    def updateOpacity(self):
+        BaseVisualStim.updateOpacity(self)
+
+    @property
+    def labelHeight(self):
+        if hasattr(self, "_labelHeight"):
+            return getattr(self._labelHeight, self.units)[1]
+
+    @labelHeight.setter
+    def labelHeight(self, value):
+        if isinstance(value, layout.Vector):
+            # If given a Size, use it
+            self._labelHeight = value
+        else:
+            # Otherwise, convert to a Size object
+            self._labelHeight = layout.Size([None, value], units=self.units, win=self.win)
+
+    @property
+    def labelWrapWidth(self):
+        if hasattr(self, "_labelWrapWidth"):
+            return getattr(self._labelWrapWidth, self.units)[0]
+
+    @labelWrapWidth.setter
+    def labelWrapWidth(self, value):
+        if value is None:
+            pass
+        elif isinstance(value, layout.Vector):
+            # If given a Size, use it
+            self._labelWrapWidth = value
+        else:
+            # Otherwise, convert to a Size object
+            self._labelWrapWidth = layout.Size([value, None], units=self.units, win=self.win)
 
     @property
     def foreColor(self):
         ColorMixin.foreColor.fget(self)
+
     @foreColor.setter
     def foreColor(self, value):
         ColorMixin.foreColor.fset(self, value)
@@ -261,18 +421,42 @@ class Slider(MinimalStim, ColorMixin):
                 lbl.color = self._foreColor.copy()
 
     @property
+    def labelColor(self):
+        """
+        Synonym of Slider.foreColor
+        """
+        return self.foreColor
+
+    @labelColor.setter
+    def labelColor(self, value):
+        self.foreColor = value
+
+    @property
     def fillColor(self):
         ColorMixin.fillColor.fget(self)
+
     @fillColor.setter
     def fillColor(self, value):
         ColorMixin.fillColor.fset(self, value)
         # Set color of marker
         if hasattr(self, 'marker'):
-            self.marker.fillColor = self._foreColor.copy()
+            self.marker.fillColor = self._fillColor.copy()
+
+    @property
+    def markerColor(self):
+        """
+        Synonym of Slider.fillColor
+        """
+        return self.fillColor
+
+    @markerColor.setter
+    def markerColor(self, value):
+        self.fillColor = value
 
     @property
     def borderColor(self):
         ColorMixin.borderColor.fget(self)
+
     @borderColor.setter
     def borderColor(self, value):
         ColorMixin.borderColor.fset(self, value)
@@ -287,177 +471,319 @@ class Slider(MinimalStim, ColorMixin):
             self.tickLines.colors = self._borderColor.copy()
             self.tickLines.opacities = self._borderColor.alpha
 
-
     def reset(self):
         """Resets the slider to its starting state (so that it can be restarted
         on each trial with a new stimulus)
         """
-        self.markerPos = None
+        self.rating = None  # this is reset to None, whatever the startValue
+        self.markerPos = self.startValue
         self.history = []
-        self.rating = None
         self.rt = None
         self.responseClock.reset()
         self.status = NOT_STARTED
 
     def _createElements(self):
-        if not self.tickLocs:
-            self._setTickLocs()
-        if self.horiz:
-            lineSize = self._lineL, self._lineW
-            tickSize = self._lineW, self._tickL
-        else:
-            lineSize = self._lineW, self._lineL
-            tickSize = self._tickL, self._lineW
-        self.line = GratingStim(win=self.win, pos=self.pos, color=self._borderColor.copy(), colorSpace=self.colorSpace,
-                                size=lineSize, sf=0, units=self.units,
-                                autoLog=False)
-        self.tickLines = ElementArrayStim(win=self.win, units=self.units,
-                                          nElements=len(self.ticks),
-                                          xys=self.tickLocs,
-                                          elementMask=None,
-                                          colors=self._borderColor.copy(), colorSpace = self.colorSpace,
-                                          opacities=self._borderColor.alpha,
-                                          sizes=tickSize, sfs=0,
-                                          autoLog=False)
+        # Refresh extent
+        self.extent = self.extent
 
+        # Make line
+        self._getLineParams()
+        self.line = Rect(
+            win=self.win,
+            pos=self.lineParams['pos'], size=self.lineParams['size'], units=self.units,
+            fillColor=self._borderColor.copy(), colorSpace=self.colorSpace,
+            autoLog=False
+        )
+        # Make ticks
+        self._getTickParams()
+        self.tickLines = ElementArrayStim(
+            win=self.win,
+            xys=self.tickParams['xys'], sizes=self.tickParams['sizes'], units=self.units,
+            nElements=len(self.ticks), elementMask=None, sfs=0,
+            colors=self._borderColor.copy(), opacities=self._borderColor.alpha, colorSpace=self.colorSpace,
+            autoLog=False
+        )
+        # Make labels
         self.labelObjs = []
         if self.labels is not None:
-            if not self.labelLocs:
-                self._setLabelLocs()
-            if self.horiz:
-                alignHoriz = 'center'
-                if not self.flip:
-                    alignVert = 'top'
-                    self.labelLocs -= [0, self._tickL]
-                else:
-                    alignVert = 'bottom'
-                    self.labelLocs += [0, self._tickL]
-            else:  # vertical
-                alignVert = 'center'
-                if not self.flip:
-                    alignHoriz = 'right'
-                    self.labelLocs -= [self._tickL, 0]
-                else:
-                    alignHoriz = 'left'
-                    self.labelLocs += [self._tickL, 0]
-            for tickN, label in enumerate(self.labels):
+            self._getLabelParams()
+            for n, label in enumerate(self.labels):
+                # Skip blank labels
                 if label is None:
                     continue
-
-                obj = TextStim(self.win, label, font=self.font,
-                               anchorHoriz=alignHoriz, anchorVert=alignVert,
-                               units=self.units, color=self._foreColor.copy(), colorSpace=self.colorSpace,
-                               pos=self.labelLocs[tickN, :],
-                               height=self.labelHeight, 
-                               wrapWidth=self.labelWrapWidth,
-                               autoLog=False)
+                # Create textbox for each label
+                obj = TextBox2(
+                    self.win, label, font=self.font,
+                    pos=self.labelParams['pos'][n], size=self.labelParams['size'][n], padding=self.labelParams['padding'][n], units=self.units,
+                    anchor=self.labelParams['anchor'][n], alignment=self.labelParams['alignment'][n],
+                    color=self._foreColor.copy(), fillColor=None, colorSpace=self.colorSpace,
+                    borderColor="red" if debug else None,
+                    letterHeight=self.labelHeight,
+                    autoLog=False
+                )
                 self.labelObjs.append(obj)
-
-        if self.units == 'norm':
-            # convert to make marker round
-            aspect = self.win.size[0] / self.win.size[1]
-            markerSize = np.array([self._tickL, self._tickL * aspect])
-        else:
-            markerSize = self._tickL
-
-        self.marker = Circle(self.win, units=self.units,
-                             size=markerSize,
-                             fillColor=self._fillColor,
-                             autoLog=False)
+        # Make marker
+        self._getMarkerParams()
+        self.marker = ShapeStim(
+            self.win,
+            vertices="circle",
+            pos=self.markerParams['pos'], size=self.markerParams['size'], units=self.units,
+            fillColor=self._fillColor, lineColor=None,
+            autoLog=False
+        )
 
         # create a rectangle to check for clicks
-        self.validArea = Rect(self.win, units=self.units,
-                              pos=self.pos,
-                              size=[d * 1.1 for d in self.size],
-                              lineColor='DarkGrey',
-                              autoLog=False)
+        self._getHitboxParams()
+        self.validArea = Rect(
+            self.win,
+            pos=self.hitboxParams['pos'], size=self.hitboxParams['size'], units=self.units,
+            fillColor=None, lineColor="red" if debug else None,
+            autoLog=False
+        )
 
-    @attributeSetter
-    def pos(self, newPos):
-        """Set position of slider
+    def _layout(self):
+        # Refresh style
+        self.style = self.style
+        # Refresh extent
+        self.extent = self.extent
 
-        Parameters
-        ----------
-        value: tuple, list
-            The new position of slider
-        """
-        newPos = np.array(newPos)
-        oldPos = self.__dict__['pos']
-        self.__dict__['pos'] = newPos
-        deltaPos = np.subtract(newPos, oldPos)
-        self.line.pos += deltaPos
-        self.validArea.pos += deltaPos
-        self.marker.pos += deltaPos
-        self.tickLines.xys += deltaPos
-        for label in self.labelObjs:
-            label.pos += deltaPos
+        # Get marker params
+        self._getMarkerParams()
+        # Apply marker params
+        self.marker.units = self.units
+        for param, value in self.markerParams.items():
+            setattr(self.marker, param, value)
+
+        # Get line params
+        self._getLineParams()
+        # Apply line params
+        self.line.units = self.units
+        for param, value in self.lineParams.items():
+            setattr(self.line, param, value)
+
+        # Get tick params
+        self._getTickParams()
+        # Apply tick params
+        self.tickLines.units = self.units
+        for param, value in self.tickParams.items():
+            setattr(self.tickLines, param, value)
+
+        # Get label params
+        self._getLabelParams()
+        # Apply label params
+        for n, obj in enumerate(self.labelObjs):
+            obj.units = self.units
+            for param, value in self.labelParams.items():
+                setattr(obj, param, value[n])
+
+        # Get hitbox params
+        self._getHitboxParams()
+        # Apply hitbox params
+        self.validArea.units = self.units
+        for param, value in self.hitboxParams.items():
+            setattr(self.validArea, param, value)
 
     def _ratingToPos(self, rating):
-        try:
-            n = len(rating)
-        except:
-            n = 1
-        pos = np.ones([n, 2], 'f') * self.pos
-
-        scaleMag = self.ticks[-1] - self.ticks[0]
-        scaleLow = self.ticks[0]
-        if self.horiz:
-            pos[:, 0] = (((rating - scaleLow) / scaleMag - 0.5) * self._lineL +
-                         self.pos[0])
+        # Get ticks or substitute
+        if self.ticks is not None:
+            ticks = self.ticks
         else:
-            pos[:, 1] = (((rating - scaleLow) / scaleMag - 0.5) * self._lineL +
-                         self.pos[1])
-
-        return pos
+            ticks = [0, len(self.labels)]
+        # If rating is a label, convert to an index
+        if isinstance(rating, str) and rating in self.labels:
+            rating = self.labels.index(rating)
+        # Reshape rating to handle multiple values
+        rating = np.array(rating)
+        rating = rating.reshape((-1, 1))
+        rating = np.hstack((rating, rating))
+        # Adjust to scale bottom
+        magDelta = rating - ticks[0]
+        # Adjust to scale magnitude
+        delta = magDelta / (ticks[-1] - ticks[0])
+        # Adjust to scale size
+        delta = self._extent.pix * (delta - 0.5)
+        # Adjust to scale pos
+        pos = delta + self._pos.pix
+        # Replace irrelevant value according to orientation
+        pos[:, int(self.horiz)] = self._pos.pix[int(self.horiz)]
+        # Convert to native units
+        return getattr(layout.Position(pos, units="pix", win=self.win), self.units)
 
     def _posToRating(self, pos):
-        scaleMag = self.ticks[-1] - self.ticks[0]
-        scaleLow = self.ticks[0]
-        if self.horiz:
-            rating = (((pos[0] - self.pos[0]) / self._lineL + 0.5)
-                      * scaleMag + scaleLow)
+        # Get ticks or substitute
+        if self.ticks is not None:
+            ticks = self.ticks
         else:
-            rating = (((pos[1] - self.pos[1]) / self._lineL + 0.5)
-                      * scaleMag + scaleLow)
+            ticks = [0, 1]
+        # Get in pix
+        pos = layout.Position(pos, units=self.win.units, win=self.win).pix
+        # Get difference from scale pos
+        delta = pos - self._pos.pix
+        # Adjust to scale size
+        delta = delta / self._extent.pix + 0.5
+        # Adjust to scale magnitude
+        magDelta = delta * (ticks[-1] - ticks[0])
+        # Adjust to scale bottom
+        rating = magDelta + ticks[0]
+        # Return relevant value according to orientation
+        return rating[1-int(self.horiz)]
 
-        return rating
+    def _getLineParams(self):
+        """
+        Calculates location and size of the line based on own location and size
+        """
+        # Store line details
+        self.lineParams = {
+            'units': self.units,
+            'pos': self.pos,
+            'size': self._extent * np.array(self._lineSizeMultiplier) + layout.Size(self._lineSizeAddition, self.units, self.win)
+        }
 
-    def _setTickLocs(self):
+    def _getMarkerParams(self):
+        """
+        Calculates location and size of marker based on own location and size
+        """
+        # Calculate pos
+        pos = self._ratingToPos(self.rating or 0)
+        # Get size (and correct for norm)
+        size = layout.Size([min(self._size.pix)]*2, 'pix', self.win)
+        # Store marker details
+        self.markerParams = {
+            'units': self.units,
+            'pos': pos,
+            'size': size * np.array(self._markerSizeMultiplier) + layout.Size(self._markerSizeAddition, self.units, self.win),
+        }
+
+    def _getTickParams(self):
         """ Calculates the locations of the line, tickLines and labels from
         the rating info
         """
-        try:
-            n = len(self.ticks)
-        except TypeError:
-            self.categorical = True
+        # If categorical, create tick values from labels
         if self.categorical:
-            self.ticks = np.arange(len(self.labels))
+            if self.labels is None:
+                self.ticks = np.arange(5)
+            else:
+                self.ticks = np.arange(len(self.labels))
             self.granularity = 1.0
+        # Calculate positions
+        xys = self._ratingToPos(self.ticks)
+        # Get size (and correct for norm)
+        size = layout.Size([min(self._extent.pix)]*2, 'pix', self.win)
+        # Store tick details
+        self.tickParams = {
+            'units': self.units,
+            'xys': xys,
+            'sizes': np.tile(
+                getattr(size, self.units) * np.array(self._tickSizeMultiplier) + np.array(self._tickSizeAddition),
+                (len(self.ticks), 1)),
+        }
 
-        self.tickLocs = self._ratingToPos(self.ticks)
-
-    def _setLabelLocs(self):
-        """ Calculates the locations of the line, tickLines and labels from
-        the rating info
-        """
-        if not self.labels:
-            self.labelLocs = []
+    def _getLabelParams(self):
+        if self.labels is None:
             return
-        labelFractions = np.arange(len(self.labels)) / (len(self.labels) - 1)
-        tickIndices = np.round(labelFractions * (len(self.tickLocs) - 1))
-        self.labelLocs = self.tickLocs[tickIndices.astype('int')]
+        # Get number of labels now for convenience
+        n = len(self.labels)
+        # Get coords of slider edges
+        top = self.pos[1] + self.extent[1] / 2
+        bottom = self.pos[1] - self.extent[1] / 2
+        left = self.pos[0] - self.extent[0] / 2
+        right = self.pos[0] + self.extent[0] / 2
+        # Work out where labels are relative to line
+        w = self.labelWrapWidth
+        if self.horiz:  # horizontal
+            # Always centered horizontally
+            anchorHoriz = alignHoriz = 'center'
+            # Width as fraction of size, height starts at double slider
+            if w is None:
+                w = self.extent[0] / len(self.ticks)
+            h = self.extent[1] * 3
+            # Evenly spaced, constant y
+            x = np.linspace(left, right, num=n)
+            x = arraytools.snapto(x, points=self.tickParams['xys'][:, 0])
+            y = [self.pos[1]] * n
+            # Padding applied on vertical
+            paddingHoriz = 0
+            paddingVert = (self._tickL + self.labelHeight) / 2
+            # Vertical align/anchor depend on flip
+            if not self.flip:
+                # Labels below means anchor them from the top
+                anchorVert = alignVert = 'top'
+            else:
+                # Labels on top means anchor them from below
+                anchorVert = alignVert = 'bottom'
+            # If style tells us to force label anchor, force it
+            if self._forceLabelAnchor is not None:
+                anchorVert = alignVert = self._forceLabelAnchor
+        else:  # vertical
+            # Always centered vertically
+            anchorVert = alignVert = 'center'
+            # Height as fraction of size, width starts at double slider
+            h = self.extent[1] / len(self.ticks)
+            if w is None:
+                w = self.extent[0] * 3
+            # Evenly spaced and clipped to ticks, constant x
+            y = np.linspace(bottom, top, num=n)
+            y = arraytools.snapto(y, points=self.tickParams['xys'][:, 1])
+            x = [self.pos[0]] * n
+            # Padding applied on horizontal
+            paddingHoriz = (self._tickL + self.labelHeight) / 2
+            paddingVert = 0
+            # Horizontal align/anchor depend on flip
+            if not self.flip:
+                # Labels left means anchor them from the right
+                anchorHoriz = alignHoriz = 'right'
+            else:
+                # Labels right means anchor them from the left
+                anchorHoriz = alignHoriz = 'left'
+            # If style tells us to force label anchor, force it
+            if self._forceLabelAnchor is not None:
+                anchorHoriz = alignHoriz = self._forceLabelAnchor
+        # Store label details
+        self.labelParams = {
+            'units': (self.units,) * n,
+            'pos': np.vstack((x, y)).transpose(None),
+            'size': np.tile((w, h), (n, 1)),
+            'padding': np.tile((paddingHoriz, paddingVert), (n, 1)),
+            'anchor': np.tile((anchorHoriz, anchorVert), (n, 1)),
+            'alignment': np.tile((alignHoriz, alignVert), (n, 1))
+        }
+
+    def _getHitboxParams(self):
+        """
+        Calculates hitbox size and pos from own size and pos
+        """
+        # Get pos
+        pos = self.pos
+        # Get size
+        size = self._extent * 1.1
+        # Store hitbox details
+        self.hitboxParams = {
+            'units': self.units,
+            'pos': pos,
+            'size': size,
+        }
 
     def _granularRating(self, rating):
         """Handle granularity for the rating"""
         if rating is not None:
-            if self.granularity > 0:
+            if self.categorical:
+                # If this is a categorical slider, snap to closest tick
+                deltas = np.absolute(np.asarray(self.ticks) - rating)
+                i = np.argmin(deltas)
+                rating = self.ticks[i]
+            elif self.granularity > 0:
                 rating = round(rating / self.granularity) * self.granularity
                 rating = round(rating, 8)  # or gives 1.9000000000000001
             rating = max(rating, self.ticks[0])
             rating = min(rating, self.ticks[-1])
         return rating
 
-    @attributeSetter
+    @property
+    def rating(self):
+        if hasattr(self, "_rating"):
+            return self._rating
+
+    @rating.setter
     def rating(self, rating):
         """The most recent rating from the participant or None.
         Note that the position of the marker can be set using current without
@@ -466,7 +792,7 @@ class Slider(MinimalStim, ColorMixin):
         self.markerPos = rating
         if self.categorical and (rating is not None):
             rating = self.labels[int(round(rating))]
-        self.__dict__['rating'] = rating
+        self._rating = rating
 
     @property
     def value(self):
@@ -477,13 +803,31 @@ class Slider(MinimalStim, ColorMixin):
         self.rating = val
 
     @attributeSetter
+    def ticks(self, value):
+        if isinstance(value, (list, tuple, np.ndarray)):
+            # make sure all values are numeric
+            for i, subval in enumerate(value):
+                if isinstance(subval, str):
+                    if subval in self.labels:
+                        # if it's a label name, get its index
+                        value[i] = self.labels.index(subval)
+                    elif subval.isnumeric():
+                        # if it's a stringified number, make it a float
+                        value[i] = float(subval)
+                    else:
+                        # otherwise, use its index within the array
+                        value[i] = i
+
+        self.__dict__['ticks'] = value
+
+    @attributeSetter
     def markerPos(self, rating):
         """The position on the scale where the marker should be. Note that
         this does not alter the value of the reported rating, only its visible
         display.
         Also note that this position is in scale units, not in coordinates"""
         rating = self._granularRating(rating)
-        if ('markerPos' not in self.__dict__ or not np.alltrue(
+        if ('markerPos' not in self.__dict__ or not np.all(
                 self.__dict__['markerPos'] == rating)):
             self.__dict__['markerPos'] = rating
             self._updateMarkerPos = True
@@ -527,13 +871,13 @@ class Slider(MinimalStim, ColorMixin):
             self.marker.pos = self._ratingToPos(rating)
             self.markerPos = rating
             self._updateMarkerPos = False
-        self.marker.draw()
 
     def draw(self):
         """Draw the Slider, with all its constituent elements on this frame
         """
         self.getMouseResponses()
-        # self.validArea.draw()
+        if debug:
+            self.validArea.draw()
         self.line.draw()
         self.tickLines.draw()
         if self.markerPos is not None:
@@ -617,6 +961,7 @@ class Slider(MinimalStim, ColorMixin):
                     self._dragging):
                 self.markerPos = self._posToRating(xy)  # updates marker
                 self._dragging = True
+            self._updateMarkerPos = True
         else:  # mouse is up - check if it *just* came up
             if self._dragging:
                 self._dragging = False
@@ -663,12 +1008,17 @@ class Slider(MinimalStim, ColorMixin):
         if hasattr(self, "tickLines"):
             self.tickLines.colors = self._borderColor.copy()
 
-    knownStyles = ['slider', 'rating', 'radio', 'scrollbar']
+    knownStyles = stt.sliderStyles
     legacyStyles = []
-    knownStyleTweaks = ['labels45', 'triangleMarker']
+    knownStyleTweaks = stt.sliderStyleTweaks
     legacyStyleTweaks = ['whiteOnBlack']
 
-    @attributeSetter
+    @property
+    def style(self):
+        if hasattr(self, "_style"):
+            return self._style
+
+    @style.setter
     def style(self, style):
         """Sets some predefined styles or use these to create your own.
 
@@ -688,7 +1038,7 @@ class Slider(MinimalStim, ColorMixin):
             Styles cannot be combined in a list - they are discrete
 
         """
-        self.__dict__['style'] = style
+        self._style = style
 
         # Legacy: If given a list (as was once the case), take the first style
         if isinstance(style, (list, tuple)):
@@ -702,63 +1052,114 @@ class Slider(MinimalStim, ColorMixin):
                 if val in self.knownStyleTweaks + self.legacyStyleTweaks:
                     self.styleTweaks += val
 
-        if style == 'rating':
-            pass  # this is just the default
+        if style == 'rating' or style is None:
+            # Narrow line
+            self.line.opacity = 1
+            self._lineSizeAddition = (0, 0)
+            if self.horiz:
+                self._lineSizeMultiplier = (1, 0.1)
+            else:
+                self._lineSizeMultiplier = (0.1, 1)
+            # 1:1 circular markers
+            self.marker.vertices = "circle"
+            self._markerSizeMultiplier = (1, 1)
+            self._markerSizeAddition = (0, 0)
+            # Narrow rectangular ticks
+            self.tickLines.elementMask = None
+            self._tickSizeAddition = (0, 0)
+            if self.horiz:
+                self._tickSizeMultiplier = (0.1, 1)
+            else:
+                self._tickSizeMultiplier = (1, 0.1)
 
         if style == 'slider':
-            # make it more like a slider using a box instead of line
-            self.line = Rect(self.win, units=self.units,
-                             pos=self.pos,
-                             size=self.size,
-                             fillColor=self._borderColor.copy(),
-                             lineColor=None,
-                             autoLog=False)
-            self.line._fillColor.alpha *= 0.2
+            # Semi-transparent rectangle for a line
+            self.line._fillColor.alpha = 0.2
+            self._lineSizeMultiplier = (1, 1)
+            self._lineSizeAddition = (0, 0)
+            # Rectangular marker
+            self.marker.vertices = "rectangle"
+            self._markerSizeAddition = (0, 0)
             if self.horiz:
-                markerW = self.size[0] * 0.01
-                markerH = self.size[1] * 0.8
+                self._markerSizeMultiplier = (0.1, 0.8)
             else:
-                markerW = self.size[0] * 0.8
-                markerH = self.size[1] * 0.01
-
-            self.marker = Rect(self.win, units=self.units,
-                               size=[markerW, markerH],
-                               fillColor=self._fillColor,
-                               lineColor=None,
-                               autoLog=False)
+                self._markerSizeMultiplier = (0.8, 0.1)
+            # Narrow rectangular ticks
+            self.tickLines.elementMask = None
+            self._tickSizeAddition = (0, 0)
+            if self.horiz:
+                self._tickSizeMultiplier = (0.1, 1)
+            else:
+                self._tickSizeMultiplier = (1, 0.1)
 
         if style == 'radio':
-            # no line, ticks are circles
-            self.line.opacity = 0
-            # ticks are circles
-            self.tickLines.sizes = (self._tickL, self._tickL)
+            # No line
+            self._lineSizeMultiplier = (0, 0)
+            self._lineSizeAddition = (0, 0)
+            # 0.7 scale circular markers
+            self.marker.vertices = "circle"
+            self._markerSizeMultiplier = (0.7, 0.7)
+            self._markerSizeAddition = (0, 0)
+            # 1:1 circular ticks
             self.tickLines.elementMask = 'circle'
-            # marker must be smalle than a "tick" circle
-            self.marker.size = self._tickL * 0.7
-            self.marker.fillColor = self._fillColor.copy()
+            self._tickSizeMultiplier = (1, 1)
+            self._tickSizeAddition = (0, 0)
+
+        if style == 'choice':
+            if self.labels is None:
+                nLabels = len(self.ticks)
+            else:
+                nLabels = len(self.labels)
+            # No line
+            if self.horiz:
+                self._lineSizeMultiplier = (1 + 1 / nLabels, 1)
+            else:
+                self._lineSizeMultiplier = (1, 1 + 1 / nLabels)
+            # Solid ticks
+            self.tickLines.elementMask = None
+            self._tickSizeAddition = (0, 0)
+            self._tickSizeMultiplier = (0, 0)
+            # Marker is box
+            self.marker.vertices = "rectangle"
+            if self.horiz:
+                self._markerSizeMultiplier = (1, 1)
+            else:
+                self._markerSizeMultiplier = (1, 1 / nLabels)
+            # Labels forced center
+            self._forceLabelAnchor = "center"
+            # Choice doesn't make sense with granularity 0
+            self.granularity = 1
 
         if style == 'scrollbar':
-            # Make marker the full height and 20% of the width of the slider
-            markerSz = self.size[0]*0.2 if self.horiz else self.size[1]*0.2
-            w, h = self.size
-            self.marker = Rect(self.win, units=self.units,
-                               size=[markerSz, h] if self.horiz else [w, markerSz],
-                               fillColor=self._fillColor,
-                               lineColor=None,
-                               autoLog=False)
-            # Make the line a translucent box
-            self.line = Rect(self.win, units=self.units,
-                             pos=self.pos,
-                             size=[w+markerSz, h] if self.horiz else [w, h+markerSz],
-                             fillColor=self._borderColor.copy(),
-                             lineColor=None,
-                             autoLog=False)
-            self.line._fillColor.alpha *= 0.05
-            self.tickLines = Rect(self.win, size=(0,0), lineColor=None, fillColor=None)
+            # Semi-transparent rectangle for a line (+ extra area for marker)
+            self.line.opacity = 1
+            self.line._fillColor.alpha = 0.2
+            self._lineSizeAddition = (0, 0)
+            if self.horiz:
+                self._lineSizeMultiplier = (1.2, 1)
+            else:
+                self._lineSizeMultiplier = (1, 1.2)
+            # Long rectangular marker
+            self.marker.vertices = "rectangle"
+            if self.horiz:
+                self._markerSizeMultiplier = (0, 1)
+                self._markerSizeAddition = (self.extent[0] / 5, 0)
+            else:
+                self._markerSizeMultiplier = (1, 0)
+                self._markerSizeAddition = (0, self.extent[1] / 5)
+            # No ticks
+            self.tickLines.elementMask = None
+            self._tickSizeAddition = (0, 0)
+            self._tickSizeMultiplier = (0, 0)
 
         # Legacy: If given a tweak, apply it as a tweak rather than a style
         if style in self.knownStyleTweaks + self.legacyStyleTweaks:
             self.styleTweaks.append(style)
+
+        # Refresh style tweaks (as these override some aspects of style)
+        self.styleTweaks = self.styleTweaks
+
+        return style
 
     @attributeSetter
     def styleTweaks(self, styleTweaks):
@@ -784,34 +1185,32 @@ class Slider(MinimalStim, ColorMixin):
             Style tweaks can be combined in a list e.g. `['labels45']`
 
         """
+        if not isinstance(styleTweaks, (list, tuple, np.ndarray)):
+            styleTweaks = [styleTweaks]
+
         self.__dict__['styleTweaks'] = styleTweaks
 
         if 'triangleMarker' in styleTweaks:
-            if self.horiz and self.flip:
-                ori = -90
-            elif self.horiz:
-                ori = -90
-            elif not self.horiz and self.flip:
-                ori = 180
+            # Vertices for corners of a square
+            tl = (-0.5, 0.5)
+            tr = (0.5, 0.5)
+            bl = (-0.5, -0.5)
+            br = (0.5, -0.5)
+            mid = (0, 0)
+            # Create triangles from 2 corners + center
+            if self.horiz:
+                if self.flip:
+                    self.marker.vertices = [mid, bl, br]
+                else:
+                    self.marker.vertices = [mid, tl, tr]
             else:
-                ori = 0
-
-            markerSize = min(self.size) * 2
-            self.marker = ShapeStim(self.win, units=self.units,
-                                    vertices=[[0, 0], [0.5, 0.5], [0.5, -0.5]],
-                                    size=markerSize,
-                                    ori=ori,
-                                    fillColor=self._fillColor.copy(),
-                                    lineColor=None,
-                                    lineWidth=0,
-                                    autoLog=False)
+                if self.flip:
+                    self.marker.vertices = [mid, tl, bl]
+                else:
+                    self.marker.vertices = [mid, tr, br]
 
         if 'labels45' in styleTweaks:
             for label in self.labelObjs:
-                if self.flip:
-                    label.alignHoriz = 'left'
-                else:
-                    label.alignHoriz = 'right'
                 label.ori = -45
 
         # Legacy

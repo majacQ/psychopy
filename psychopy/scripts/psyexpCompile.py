@@ -2,22 +2,19 @@
 # -*- coding: utf-8 -*-
 
 # Part of the PsychoPy library
-# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2021 Open Science Tools Ltd.
+# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2024 Open Science Tools Ltd.
 # Distributed under the terms of the GNU General Public License (GPL).
 
 import io
 import sys
 import os
 import argparse
-import traceback
-from copy import deepcopy
 from subprocess import PIPE, Popen
+from pathlib import Path
 
-from psychopy.constants import PY3
-from psychopy import __version__, logging
+from psychopy import __version__
 
-# parse args for subprocess
-from psychopy.experiment.routines import BaseStandaloneRoutine
+# DO NOT IMPORT ANY OTHER PSYCHOPY SUB-PACKAGES OR THEY WON'T SWITCH VERSIONS
 
 parser = argparse.ArgumentParser(description='Compile your python file from here')
 parser.add_argument('infile', help='The input (psyexp) file to be compiled')
@@ -25,43 +22,47 @@ parser.add_argument('--version', '-v', help='The PsychoPy version to use for com
 parser.add_argument('--outfile', '-o', help='The output (py) file to be generated (defaults to the ')
 
 
-def generateScript(experimentPath, exp, target="PsychoPy"):
+class LegacyScriptError(ChildProcessError):
+    pass
+
+
+def generateScript(exp, outfile, target="PsychoPy"):
     """
     Generate python script from the current builder experiment.
 
     Parameters
     ----------
-    experimentPath: str
-        Experiment path and filename
     exp: experiment.Experiment object
         The current PsychoPy experiment object generated using Builder
+    outfile : str or Path
+        File to write to
     target: str
         PsychoPy or PsychoJS - determines whether Python or JS script is generated.
 
     Returns
     -------
     """
+    import logging  # import here not at top of script (or useVersion fails)
     print("Generating {} script...\n".format(target))
-    exp.expPath = os.path.abspath(experimentPath)
-
-    if sys.platform == 'win32':  # get name of executable
+    # get name of executable
+    if sys.platform == 'win32':
         pythonExec = sys.executable
     else:
         pythonExec = sys.executable.replace(' ', r'\ ')
-
-    filename = experimentPath
-    if not PY3:  # encode path in Python2
-        filename = experimentPath = experimentPath.encode(sys.getfilesystemencoding())
-
-    # Compile script from command line using version
+    # compile script from command line using version
     compiler = 'psychopy.scripts.psyexpCompile'
-    # run compile
-    cmd = [pythonExec, '-m', compiler, exp.filename,
-           '-o', experimentPath]
     # if version is not specified then don't touch useVersion at all
     version = exp.settings.params['Use version'].val
-
+    # if useVersion is different to installed version...
     if version not in [None, 'None', '', __version__]:
+        # make sure we have a legacy save file
+        if not Path(exp.legacyFilename).is_file():
+            exp.saveToXML(filename=exp.filename)
+        # generate command to run compile from requested version
+        cmd = [
+            pythonExec, '-m', compiler, str(exp.legacyFilename), '-o', outfile
+        ]
+        # run command
         cmd.extend(['-v', version])
         logging.info(' '.join(cmd))
         output = Popen(cmd,
@@ -71,14 +72,24 @@ def generateScript(experimentPath, exp, target="PsychoPy"):
         stdout, stderr = output.communicate()
         sys.stdout.write(stdout)
         sys.stderr.write(stderr)
+
+        # we got a non-zero error code, raise an error
+        if output.returncode != 0:
+            raise LegacyScriptError(
+                'Error: Script compile exited with code {}. Traceback:\n'
+                '{}'.format(output.returncode, stderr))
+
     else:
-        compileScript(infile=exp, version=None, outfile=filename)
+        compileScript(infile=exp, version=None, outfile=outfile)
+
+    return outfile
+
 
 def compileScript(infile=None, version=None, outfile=None):
     """
     Compile either Python or JS PsychoPy script from .psyexp file.
 
-    Paramaters
+    Parameters
     ----------
 
     infile: string, experiment.Experiment object
@@ -105,8 +116,8 @@ def compileScript(infile=None, version=None, outfile=None):
             from psychopy import useVersion
             useVersion(version)
 
+        # import logging here not at top of script (or useVersion fails)
         global logging
-
         from psychopy import logging
 
         if __name__ != '__main__' and version not in [None, 'None', 'none', '']:
@@ -142,43 +153,6 @@ def compileScript(infile=None, version=None, outfile=None):
             thisExp.psychopyVersion = version
 
         return thisExp
-
-    def _removeDisabledComponents(exp):
-        """
-        Drop disabled components, if any.
-
-        Parameters
-        ---------
-        exp : psychopy.experiment.Experiment
-            The experiment from which to remove all components that have been
-            marked `disabled`.
-
-        Returns
-        -------
-        exp : psychopy.experiment.Experiment
-            The experiment with the disabled components removed.
-
-        Notes
-        -----
-        This function leaves the original experiment unchanged as it always
-        only works on (and returns) a copy.
-        """
-        # Leave original experiment unchanged.
-        exp = deepcopy(exp)
-        for key, routine in list(exp.routines.items()):  # PY2/3 compat
-            if isinstance(routine, BaseStandaloneRoutine):
-                if routine.params['disabled'].val:
-                    for node in exp.flow:
-                        if node == routine:
-                            exp.flow.removeComponent(node)
-            else:
-                for component in routine:
-                    try:
-                        if component.params['disabled'].val:
-                            routine.removeComponent(component)
-                    except KeyError:
-                        pass
-        return exp
 
     def _setTarget(outfile):
         """
@@ -222,20 +196,20 @@ def compileScript(infile=None, version=None, outfile=None):
             outfileNoModule = outfile.replace('.js', '-legacy-browsers.js')  # For no JS module script
             scriptNoModule = thisExp.writeScript(outfileNoModule, target=targetOutput, modular=False)
             # Store scripts in list
-            scriptDict = {'outfile': script, 'outfileNoModule': scriptNoModule}
+            scriptDict = [(outfile, script), (outfileNoModule, scriptNoModule)]
         else:
             script = thisExp.writeScript(outfile, target=targetOutput)
-            scriptDict = {'outfile': script}
+            scriptDict = [(outfile, script)]
 
         # Output script to file
-        for scripts in scriptDict:
-            if not type(scriptDict[scripts]) in (str, type(u'')):
+        for outfile, script in scriptDict:
+            if not type(script) in (str, type(u'')):
                 # We have a stringBuffer not plain string/text
-                scriptText = scriptDict[scripts].getvalue()
+                scriptText = script.getvalue()
             else:
                 # We already have the text
-                scriptText = scriptDict[scripts]
-            with io.open(eval(scripts), 'w', encoding='utf-8-sig') as f:
+                scriptText = script
+            with io.open(outfile, 'w', encoding='utf-8-sig') as f:
                 f.write(scriptText)
 
         return 1
@@ -243,7 +217,6 @@ def compileScript(infile=None, version=None, outfile=None):
     ###### Write script #####
     version = _setVersion(version)
     thisExp = _getExperiment(infile, version)
-    thisExp = _removeDisabledComponents(thisExp)
     targetOutput = _setTarget(outfile)
     _makeTarget(thisExp, outfile, targetOutput)
 

@@ -5,24 +5,40 @@ Simple iohub eye tracker device demo.
 Select which tracker to use by setting the TRACKER variable below.
 """
 
-from __future__ import absolute_import, division, print_function
 from psychopy import core, visual
 from psychopy.iohub import launchHubServer
+from psychopy.iohub.util import hideWindow, showWindow
 
 # Eye tracker to use ('mouse', 'eyelink', 'gazepoint', or 'tobii')
 TRACKER = 'mouse'
+BACKGROUND_COLOR = [128, 128, 128]
 
+devices_config = dict()
 eyetracker_config = dict(name='tracker')
-devices_config = {}
 if TRACKER == 'mouse':
+    eyetracker_config['calibration'] = dict(screen_background_color=BACKGROUND_COLOR,
+                                            auto_pace=True,
+                                            target_attributes=dict(animate=dict(enable=True, expansion_ratio=1.5,
+                                                                                contract_only=False))
+                                            )
     devices_config['eyetracker.hw.mouse.EyeTracker'] = eyetracker_config
 elif TRACKER == 'eyelink':
     eyetracker_config['model_name'] = 'EYELINK 1000 DESKTOP'
+    eyetracker_config['simulation_mode'] = False
     eyetracker_config['runtime_settings'] = dict(sampling_rate=1000, track_eyes='RIGHT')
+    eyetracker_config['calibration'] = dict(screen_background_color=BACKGROUND_COLOR, auto_pace=True)
     devices_config['eyetracker.hw.sr_research.eyelink.EyeTracker'] = eyetracker_config
 elif TRACKER == 'gazepoint':
+    eyetracker_config['calibration'] = dict(use_builtin=False, screen_background_color=BACKGROUND_COLOR,
+                                            auto_pace=True,
+                                            target_attributes=dict(animate=dict(enable=True, expansion_ratio=1.5,
+                                                                                contract_only=False)))
     devices_config['eyetracker.hw.gazepoint.gp3.EyeTracker'] = eyetracker_config
 elif TRACKER == 'tobii':
+    eyetracker_config['calibration'] = dict(screen_background_color=BACKGROUND_COLOR,
+                                            auto_pace=True,
+                                            target_attributes=dict(animate=dict(enable=True, expansion_ratio=1.5,
+                                                                                contract_only=False)))
     devices_config['eyetracker.hw.tobii.EyeTracker'] = eyetracker_config
 else:
     print("{} is not a valid TRACKER name; please use 'mouse', 'eyelink', 'gazepoint', or 'tobii'.".format(TRACKER))
@@ -38,7 +54,8 @@ win = visual.Window((1920, 1080),
                     allowGUI=False,
                     colorSpace='rgb255',
                     monitor='55w_60dist',
-                    color=[128, 128, 128]
+                    color=BACKGROUND_COLOR,
+                    screen=0
                     )
 
 win.setMouseVisible(False)
@@ -56,16 +73,13 @@ io = launchHubServer(window=win, **devices_config)
 keyboard = io.getDevice('keyboard')
 tracker = io.getDevice('tracker')
 
-win.winHandle.minimize()  # minimize the PsychoPy window
-win.winHandle.set_fullscreen(False)
-
-# run eyetracker calibration
+# Minimize the PsychoPy window if needed
+hideWindow(win)
+# Display calibration gfx window and run calibration.
 result = tracker.runSetupProcedure()
 print("Calibration returned: ", result)
-
-win.winHandle.set_fullscreen(True)
-win.winHandle.maximize()  # maximize the PsychoPy window
-
+# Maximize the PsychoPy window if needed
+showWindow(win)
 
 gaze_ok_region = visual.Circle(win, lineColor='black', radius=300, units='pix', colorSpace='named')
 
@@ -130,6 +144,4 @@ while t < TRIAL_COUNT:
 # End experiment
 win.close()
 tracker.setConnectionState(False)
-
-io.quit()
 core.quit()

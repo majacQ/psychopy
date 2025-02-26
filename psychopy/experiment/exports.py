@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # Part of the PsychoPy library
-# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2021 Open Science Tools Ltd.
+# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2024 Open Science Tools Ltd.
 # Distributed under the terms of the GNU General Public License (GPL).
 
 """Experiment classes:
@@ -16,35 +16,27 @@ The code that writes out a *_lastrun.py experiment file is (in order):
     settings.SettingsComponent.writeEndCode()
 """
 
-from __future__ import absolute_import, print_function
-
 import io
 import keyword
 import re
 
-from builtins import object
-from builtins import str
-# from future import standard_library
-
 import psychopy
 from psychopy import constants
-from psychopy.constants import PY3
 from psychopy.localization import _translate
 from .components.settings import _numpyImports, _numpyRandomImports
 from .utils import nonalphanumeric_re, valid_var_re
-
-# standard_library.install_aliases()
 
 # predefine some regex's; deepcopy complains if do in NameSpace.__init__()
 
 
 class IndentingBuffer(io.StringIO):
 
-    def __init__(self, *args, **kwargs):
-        io.StringIO.__init__(self, *args, **kwargs)
+    def __init__(self, target='PsychoPy', initial_value='', newline='\n'):
+        io.StringIO.__init__(self, initial_value, newline)
         self.oneIndent = "    "
         self.indentLevel = 0
         self._writtenOnce = []
+        self.target = target  # useful to keep track of what language is written here
 
     def writeIndented(self, text):
         """Write to the StringIO buffer, but add the current indent.
@@ -54,14 +46,16 @@ class IndentingBuffer(io.StringIO):
             self.getvalue()[-1]=='\n'
 
         """
-        self.write(self.oneIndent * self.indentLevel + text)
+        for line in text.splitlines(keepends=True):
+            self.write(self.oneIndent * self.indentLevel + line)
 
     def writeIndentedLines(self, text):
         """As writeIndented(text) except that each line in text gets
         the indent level rather than the first line only.
         """
-        for line in text.splitlines():
-            self.write(self.oneIndent * self.indentLevel + line + '\n')
+        if not text.endswith("\n"):
+            text += "\n"
+        self.writeIndented(text)
 
     def writeOnceIndentedLines(self, text):
         """Add code to the experiment that is only run exactly once,
@@ -99,14 +93,11 @@ class IndentingBuffer(io.StringIO):
             self.indentLevel = newLevel
 
     def write(self, text):
-        if PY3:
-            io.StringIO.write(self, "{}".format(text))
-        else:
-            io.StringIO.write(self, u"{}".format(text))
+        io.StringIO.write(self, "{}".format(text))
 
 
 # noinspection PyUnresolvedReferences
-class NameSpace(object):
+class NameSpace:
     """class for managing variable names in builder-constructed experiments.
 
     The aim is to help detect and avoid name-space collisions from
@@ -145,7 +136,7 @@ class NameSpace(object):
 
         self.numpy = _numpyImports + _numpyRandomImports + ['np']
         # noinspection PyUnresolvedReferences
-        self.keywords = keyword.kwlist + dir(__builtins__)
+        self.keywords = keyword.kwlist + dir(__builtins__) + ['self']
         # these are based on a partial test, known to be incomplete:
         self.psychopy = psychopy.__all__ + ['psychopy', 'os']
         self.constants = dir(constants)
@@ -166,6 +157,47 @@ class NameSpace(object):
         if numpy_count_only:
             return "%s + [%d numpy]" % (str(varibs), len(self.numpy))
         return str(varibs + self.numpy)
+
+    @property
+    def all(self):
+        return (
+                self.builder +
+                self.constants +
+                self.keywords +
+                self.nonUserBuilder +
+                self.numpy +
+                self.psychopy +
+                self.user
+        )
+
+    def getCategories(self, name):
+        """
+        Get list of categories in which a given name is found.
+
+        Parameters
+        ----------
+        name : str
+            Name to look for
+        """
+        # Define possible categories
+        categories = (
+            "builder",
+            "constants",
+            "keywords",
+            "nonUserBuilder",
+            "numpy",
+            "psychopy",
+            "user"
+        )
+        # Check for name in each category
+        found = []
+        for cat in categories:
+            if name in getattr(self, cat):
+                found.append(cat)
+
+        return found
+
+
 
     def getDerived(self, basename):
         """ buggy

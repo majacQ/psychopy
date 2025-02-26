@@ -2,20 +2,16 @@
 # -*- coding: utf-8 -*-
 
 # Part of the PsychoPy library
-# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2021 Open Science Tools Ltd.
+# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2024 Open Science Tools Ltd.
 # Distributed under the terms of the GNU General Public License (GPL).
 
 """Dialog classes for the Builder, including ParamCtrls
 """
-
-from __future__ import absolute_import, division, print_function
 import sys
 
-from builtins import map
-from builtins import str
-from builtins import object
 import os
 import copy
+import time
 from collections import OrderedDict
 
 import numpy
@@ -30,22 +26,23 @@ from .. import experiment
 from .. validators import NameValidator, CodeSnippetValidator, WarningManager
 from .dlgsConditions import DlgConditions
 from .dlgsCode import DlgCodeComponentProperties, CodeBox
+from .findDlg import BuilderFindDlg
 from . import paramCtrls
-from psychopy import data, logging
+from psychopy.app.utils import HyperLinkCtrl
+from psychopy import data, logging, exceptions, plugins
 from psychopy.localization import _translate
-from psychopy.tools import versionchooser as vc
+from psychopy.tools import versionchooser as vc, pkgtools
+from psychopy.alerts import alert
 from ...colorpicker import PsychoColorPicker
 from pathlib import Path
 
-from ...themes import ThemeMixin
+from ...themes import handlers, icons
 
 white = wx.Colour(255, 255, 255, 255)
 codeSyntaxOkay = wx.Colour(220, 250, 220, 255)  # light green
 
-from ..localizedStrings import _localizedDialogs as _localized
 
-
-class ParamCtrls(object):
+class ParamCtrls():
 
     def __init__(self, dlg, label, param, parent, fieldName,
                  browse=False, noCtrls=False, advanced=False, appPrefs=None):
@@ -112,83 +109,159 @@ class ParamCtrls(object):
             # settings. If remote info has become available in the meantime,
             # now populate with that as well
             if vc._remoteVersionsCache:
-                options = vc._versionFilter(vc.versionOptions(local=False), wx.__version__)
-                versions = vc._versionFilter(vc.availableVersions(local=False), wx.__version__)
+                options = vc._versionFilter(
+                    vc.versionOptions(local=False), wx.__version__)
+                versions = vc._versionFilter(
+                    vc.availableVersions(local=False), wx.__version__)
                 param.allowedVals = (options + [''] + versions)
 
         if param.inputType == "single":
             # Create single line string control
-            self.valueCtrl = paramCtrls.SingleLineCtrl(parent,
-                                                   val=str(param.val), valType=param.valType,
-                                                   fieldName=fieldName,size=wx.Size(self.valueWidth, 24))
+            self.valueCtrl = paramCtrls.SingleLineCtrl(
+                parent, 
+                val=str(param.val), 
+                valType=param.valType,
+                fieldName=fieldName, 
+                size=wx.Size(int(self.valueWidth), 24))
         elif param.inputType == 'multi':
-            # Create multiline string control
-            self.valueCtrl = paramCtrls.MultiLineCtrl(parent,
-                                                      val=str(param.val), valType=param.valType,
-                                                      fieldName=fieldName, size=wx.Size(self.valueWidth, 144))
+            if param.valType == "extendedCode":
+                # Create multiline code control
+                self.valueCtrl = paramCtrls.CodeCtrl(
+                    parent, 
+                    val=str(param.val), 
+                    valType=param.valType, 
+                    fieldName=fieldName, 
+                    size=wx.Size(int(self.valueWidth), 144))
+            else:
+                # Create multiline string control
+                self.valueCtrl = paramCtrls.MultiLineCtrl(
+                    parent, 
+                    val=str(param.val),
+                    valType=param.valType,
+                    fieldName=fieldName, 
+                    size=wx.Size(int(self.valueWidth), 144))
             # Set focus if field is text of a Textbox or Text component
             if fieldName == 'text':
                 self.valueCtrl.SetFocus()
         elif param.inputType == 'spin':
             # Create single line string control
-            self.valueCtrl = paramCtrls.SingleLineCtrl(parent,
-                                                   val=str(param.val), valType=param.valType,
-                                                   fieldName=fieldName,size=wx.Size(self.valueWidth, 24))
+            self.valueCtrl = paramCtrls.SingleLineCtrl(
+                parent, 
+                val=str(param.val), 
+                valType=param.valType,
+                fieldName=fieldName, 
+                size=wx.Size(int(self.valueWidth), 24))
             # Will have to disable spinCtrl until we have a dropdown for inputType, sadly
             # self.valueCtrl = paramCtrls.IntCtrl(parent,
             #                                     val=param.val, valType=param.valType,
             #                                     fieldName=fieldName,size=wx.Size(self.valueWidth, 24),
             #                                     limits=param.allowedVals)
         elif param.inputType == 'choice':
-            self.valueCtrl = paramCtrls.ChoiceCtrl(parent,
-                                                   val=str(param.val), valType=param.valType, choices=param.allowedVals,
-                                                   fieldName=fieldName, size=wx.Size(self.valueWidth, 24))
+            self.valueCtrl = paramCtrls.ChoiceCtrl(
+                parent, 
+                val=str(param.val), 
+                valType=param.valType,
+                choices=param.allowedVals, 
+                labels=param.allowedLabels,
+                fieldName=fieldName)
         elif param.inputType == 'multiChoice':
-            self.valueCtrl = paramCtrls.MultiChoiceCtrl(parent, valType=param.valType,
-                                                        vals=param.val, choices=param.allowedVals, fieldName=fieldName,
-                                                        size=wx.Size(self.valueWidth, -1))
+            self.valueCtrl = paramCtrls.MultiChoiceCtrl(
+                parent, 
+                valType=param.valType, 
+                vals=param.val, 
+                choices=param.allowedVals, 
+                fieldName=fieldName,
+                size=wx.Size(int(self.valueWidth), -1))
+        elif param.inputType == 'richChoice':
+            self.valueCtrl = paramCtrls.RichChoiceCtrl(
+                parent, 
+                valType=param.valType,
+                vals=param.val,
+                choices=param.allowedVals, 
+                labels=param.allowedLabels,
+                fieldName=fieldName,
+                size=wx.Size(int(self.valueWidth), -1))
         elif param.inputType == 'bool':
-            self.valueCtrl = paramCtrls.BoolCtrl(parent,
-                                         name=fieldName,size=wx.Size(self.valueWidth, 24))
-            self.valueCtrl.SetValue(bool(param.val))
+            self.valueCtrl = paramCtrls.BoolCtrl(
+                parent, 
+                name=fieldName, 
+                size=wx.Size(int(self.valueWidth), 24))
+            self.valueCtrl.SetValue(bool(param))
         elif param.inputType == 'file' or browse:
-            self.valueCtrl = paramCtrls.FileCtrl(parent,
-                                                 val=str(param.val), valType=param.valType,
-                                                 fieldName=fieldName, size=wx.Size(self.valueWidth, 24))
+            self.valueCtrl = paramCtrls.FileCtrl(
+                parent, 
+                val=str(param.val),
+                valType=param.valType,
+                fieldName=fieldName, 
+                size=wx.Size(int(self.valueWidth), 24))
+            self.valueCtrl.allowedVals = param.allowedVals
+        elif param.inputType == 'font':
+            self.valueCtrl = paramCtrls.FontCtrl(
+                parent, 
+                val=str(param.val), 
+                valType=param.valType,
+                fieldName=fieldName, 
+                size=wx.Size(int(self.valueWidth), 24))
+        elif param.inputType == 'survey':
+            self.valueCtrl = paramCtrls.SurveyCtrl(
+                parent, 
+                val=str(param.val), 
+                valType=param.valType,
+                fieldName=fieldName, 
+                size=wx.Size(int(self.valueWidth), 24))
             self.valueCtrl.allowedVals = param.allowedVals
         elif param.inputType == 'fileList':
-            self.valueCtrl = paramCtrls.FileListCtrl(parent,
-                                          choices=param.val, valType=param.valType,
-                                          size=wx.Size(self.valueWidth, 100), pathtype="rel")
+            self.valueCtrl = paramCtrls.FileListCtrl(
+                parent, 
+                choices=param.val, 
+                valType=param.valType,
+                size=wx.Size(int(self.valueWidth), 100), 
+                pathtype="rel")
         elif param.inputType == 'table':
-            self.valueCtrl = paramCtrls.TableCtrl(parent, val=param.val, valType=param.valType,
-                                                  fieldName=fieldName, size=wx.Size(self.valueWidth, 24))
+            self.valueCtrl = paramCtrls.TableCtrl(
+                parent, 
+                param=param,
+                fieldName=fieldName, 
+                size=wx.Size(int(self.valueWidth), 24))
         elif param.inputType == 'color':
-            self.valueCtrl = paramCtrls.ColorCtrl(parent,
-                                                  val=param.val, valType=param.valType,
-                                                  fieldName=fieldName, size=wx.Size(self.valueWidth, 24))
+            self.valueCtrl = paramCtrls.ColorCtrl(
+                parent,
+                val=param.val, 
+                valType=param.valType,
+                fieldName=fieldName, 
+                size=wx.Size(int(self.valueWidth), 24))
         elif param.inputType == 'dict':
-            self.valueCtrl = paramCtrls.DictCtrl(parent,
-                                                 val=self.exp.settings.getInfo(), valType=param.valType,
-                                                 fieldName=fieldName)
+            self.valueCtrl = paramCtrls.DictCtrl(
+                parent,
+                val=param.val,
+                labels=param.allowedLabels,
+                valType=param.valType,
+                fieldName=fieldName)
+        elif param.inputType == 'inv':
+            self.valueCtrl = paramCtrls.InvalidCtrl(
+                parent,
+                val=str(param.val), 
+                valType=param.valType,
+                fieldName=fieldName, 
+                size=wx.Size(int(self.valueWidth), 24))
         else:
-            self.valueCtrl = paramCtrls.SingleLineCtrl(parent,
-                                                   val=str(param.val), valType=param.valType,
-                                                   fieldName=fieldName,size=wx.Size(self.valueWidth, 24))
-            logging.warn(f"Parameter {fieldName} has unrecognised inputType \"{param.inputType}\"")
+            self.valueCtrl = paramCtrls.SingleLineCtrl(
+                parent,
+                val=str(param.val), 
+                valType=param.valType,
+                fieldName=fieldName,
+                size=wx.Size(int(self.valueWidth), 24))
+            logging.warn(
+                f"Parameter {fieldName} has unrecognised inputType \"{param.inputType}\"")
 
         # if fieldName == 'Experiment info':
         #     # for expInfo convert from a string to the list-of-dicts
         # val = self.expInfoToListWidget(param.val)
         #     self.valueCtrl = dialogs.ListWidget(
         #         parent, val, order=['Field', 'Default'])
-
-        try:
+        if hasattr(self.valueCtrl, 'SetToolTip'):
             self.valueCtrl.SetToolTip(wx.ToolTip(_translate(param.hint)))
-        except AttributeError as e:
-            self.valueCtrl.SetToolTipString(_translate(param.hint))
-
-        if len(param.allowedVals) == 1 or param.readOnly:
+        if not callable(param.allowedVals) and len(param.allowedVals) == 1 or param.readOnly:
             self.valueCtrl.Disable()  # visible but can't be changed
 
         # add a Validator to the valueCtrl
@@ -196,7 +269,7 @@ class ParamCtrls(object):
             self.valueCtrl.SetValidator(NameValidator())
         elif param.inputType in ("single", "multi"):
             # only want anything that is valType code, or can be with $
-            self.valueCtrl.SetValidator(CodeSnippetValidator(fieldName))
+            self.valueCtrl.SetValidator(CodeSnippetValidator(fieldName, param.label))
 
         # create the type control
         if len(param.allowedTypes):
@@ -209,9 +282,14 @@ class ParamCtrls(object):
                 self.typeCtrl.Disable()  # visible but can't be changed
 
         # create update control
+        _localizedUpdateLbls = {
+            'constant': _translate('constant'),
+            'set every repeat': _translate('set every repeat'),
+            'set every frame': _translate('set every frame'),
+        }
         if param.allowedUpdates is not None and len(param.allowedUpdates):
             # updates = display-only version of allowed updates
-            updateLabels = [_localized[upd] for upd in param.allowedUpdates]
+            updateLabels = [_localizedUpdateLbls.get(upd, upd) for upd in param.allowedUpdates]
             # allowedUpdates = extend version of allowed updates that includes
             # "set during:static period"
             allowedUpdates = copy.copy(param.allowedUpdates)
@@ -237,7 +315,7 @@ class ParamCtrls(object):
             # set by integer index, not string value
             self.updateCtrl.SetSelection(index)
 
-        if param.allowedUpdates != None and len(param.allowedUpdates) == 1:
+        if self.updateCtrl is not None and len(self.updateCtrl.GetItems()) == 1:
             self.updateCtrl.Disable()  # visible but can't be changed
 
     def _getCtrlValue(self, ctrl):
@@ -253,6 +331,10 @@ class ParamCtrls(object):
         """
         if ctrl is None:
             return None
+        elif hasattr(ctrl, 'getValue'):
+            return ctrl.getValue()
+        elif ctrl == self.updateCtrl:
+            return ctrl.GetStringSelection()
         elif hasattr(ctrl, 'GetText'):
             return ctrl.GetText()
         elif hasattr(ctrl, 'GetValue'):  # e.g. TextCtrl
@@ -262,11 +344,6 @@ class ParamCtrls(object):
             return val
         elif hasattr(ctrl, 'GetCheckedStrings'):
             return ctrl.GetCheckedStrings()
-        elif hasattr(ctrl, 'GetSelection'):  # for wx.Choice
-            # _choices is defined during __init__ for all wx.Choice() ctrls
-            # NOTE: add untranslated value to _choices if
-            # _choices[ctrl.GetSelection()] fails.
-            return ctrl._choices[ctrl.GetSelection()]
         elif hasattr(ctrl, 'GetLabel'):  # for wx.StaticText
             return ctrl.GetLabel()
         else:
@@ -286,6 +363,8 @@ class ParamCtrls(object):
         """
         if ctrl is None:
             return None
+        elif hasattr(ctrl, "setValue"):
+            ctrl.setValue(newVal)
         elif hasattr(ctrl, 'SetValue'):  # e.g. TextCtrl
             ctrl.SetValue(newVal)
         elif hasattr(ctrl, 'SetSelection'):  # for wx.Choice
@@ -323,6 +402,7 @@ class ParamCtrls(object):
             return self._getCtrlValue(self.updateCtrl)
 
     def setVisible(self, newVal=True):
+        self._visible = newVal
         if hasattr(self.valueCtrl, "ShowAll"):
             self.valueCtrl.ShowAll(newVal)
         else:
@@ -332,6 +412,12 @@ class ParamCtrls(object):
             self.updateCtrl.Show(newVal)
         if self.typeCtrl:
             self.typeCtrl.Show(newVal)
+
+    def getVisible(self):
+        if hasattr(self, "_visible"):
+            return self._visible
+        else:
+            return self.valueCtrl.IsShown()
 
     def expInfoToListWidget(self, expInfoStr):
         """Takes a string describing a dictionary and turns it into a format
@@ -370,12 +456,14 @@ class ParamCtrls(object):
             self.valueCtrl.Bind(wx.stc.EVT_STC_CHANGE, callbackFunction)
         elif isinstance(self.valueCtrl, wx.ComboBox):
             self.valueCtrl.Bind(wx.EVT_COMBOBOX, callbackFunction)
-        elif isinstance(self.valueCtrl, wx.Choice):
+        elif isinstance(self.valueCtrl, (wx.Choice, paramCtrls.RichChoiceCtrl)):
             self.valueCtrl.Bind(wx.EVT_CHOICE, callbackFunction)
         elif isinstance(self.valueCtrl, wx.CheckListBox):
             self.valueCtrl.Bind(wx.EVT_CHECKLISTBOX, callbackFunction)
         elif isinstance(self.valueCtrl, wx.CheckBox):
             self.valueCtrl.Bind(wx.EVT_CHECKBOX, callbackFunction)
+        elif isinstance(self.valueCtrl, paramCtrls.CodeCtrl):
+            self.valueCtrl.Bind(wx.EVT_KEY_UP, callbackFunction)
         elif isinstance(self.valueCtrl, (paramCtrls.DictCtrl, paramCtrls.FileListCtrl)):
             pass
         else:
@@ -388,44 +476,103 @@ class StartStopCtrls(wx.GridBagSizer):
         wx.GridBagSizer.__init__(self, 0, 0)
         # Make ctrls
         self.ctrls = {}
+        self.parent = parent
+        empty = True
         for name, param in params.items():
             if name in ['startVal', 'stopVal']:
+                # Add dollar sign
+                self.dollar = wx.StaticText(parent, label="$")
+                self.Add(self.dollar, (0, 0), border=6, flag=wx.ALIGN_CENTER_VERTICAL | wx.TOP | wx.RIGHT)
+                # Add ctrl
                 self.ctrls[name] = wx.TextCtrl(parent,
                                                value=str(param.val), size=wx.Size(-1, 24))
+                self.ctrls[name].SetToolTip(param.hint)
+                self.ctrls[name].Bind(wx.EVT_TEXT, self.updateCodeFont)
+                self.updateCodeFont(self.ctrls[name])
                 self.label = wx.StaticText(parent, label=param.label)
-                self.Add(self.ctrls[name], (0, 1), border=6, flag=wx.EXPAND | wx.TOP)
+                self.Add(self.ctrls[name], (0, 2), border=6, flag=wx.EXPAND | wx.TOP)
+                # There is now content
+                empty = False
             if name in ['startType', 'stopType']:
+                localizedChoices = list(map(_translate, param.allowedVals or [param.val]))
                 self.ctrls[name] = wx.Choice(parent,
-                                             choices=param.allowedVals,
-                                             size=wx.Size(96, 24))
-                self.ctrls[name].SetStringSelection(str(param.val))
-                self.Add(self.ctrls[name], (0, 0), border=6, flag=wx.EXPAND | wx.TOP)
+                                             choices=localizedChoices,
+                                             size=wx.Size(96, -1))
+                self.ctrls[name]._choices = copy.copy(param.allowedVals)
+                self.ctrls[name].SetSelection(param.allowedVals.index(str(param.val)))
+                self.Add(self.ctrls[name], (0, 1), border=6, flag=wx.EXPAND | wx.TOP)
+                # There is now content
+                empty = False
             if name in ['startEstim', 'durationEstim']:
                 self.ctrls[name] = wx.TextCtrl(parent,
                                                value=str(param.val), size=wx.Size(-1, 24))
+                self.ctrls[name].Bind(wx.EVT_TEXT, self.updateCodeFont)
+                self.updateCodeFont(self.ctrls[name])
                 self.estimLabel = wx.StaticText(parent,
                                                 label=param.label, size=wx.Size(-1, 24))
                 self.estimLabel.SetForegroundColour("grey")
-                self.Add(self.estimLabel, (1, 0), border=6, flag=wx.EXPAND | wx.ALL)
-                self.Add(self.ctrls[name], (1, 1), border=6, flag=wx.EXPAND | wx.TOP | wx.BOTTOM)
-        self.AddGrowableCol(1)
+                self.Add(self.estimLabel, (1, 1), border=6, flag=wx.EXPAND | wx.ALL)
+                self.Add(self.ctrls[name], (1, 2), border=6, flag=wx.EXPAND | wx.TOP | wx.BOTTOM)
+                # There is now content
+                empty = False
+        if not empty:
+            self.AddGrowableCol(2)
+
+    def getVisible(self):
+        return all(ctrl.IsShown() for ctrl in self.ctrls.values())
+
+    def setVisible(self, visible=True):
+        # Show/hide controls
+        for ctrl in self.ctrls.values():
+            ctrl.Show(visible)
+        # Show/hide labels
+        if hasattr(self, "estimLabel"):
+            self.estimLabel.Show(visible)
+        if hasattr(self, "label"):
+            self.label.Show(visible)
+        # show/hide dollars
+        if hasattr(self, "dollar"):
+            self.dollar.Show(visible)
+        # Set value to None if hidden (specific to start/stop)
+        if not visible:
+            if "startVal" in self.ctrls:
+                self.ctrls["startVal"].Value = ""
+            if "stopVal" in self.ctrls:
+                self.ctrls["stopVal"].Value = ""
+        # Layout
+        self.parent.Layout()
+
+    def updateCodeFont(self, evt=None):
+        """Style input box according to code wanted"""
+        if isinstance(evt, wx.TextCtrl):
+            obj = evt
+        else:
+            obj = evt.EventObject
+        if psychopy.experiment.utils.unescapedDollarSign_re.match(obj.GetLineText(0)):
+            # Set font if code
+            obj.SetFont(self.parent.GetTopLevelParent().app._codeFont.Bold())
+        else:
+            # Set font if not
+            obj.SetFont(self.parent.GetTopLevelParent().app._mainFont)
 
 
-class ParamNotebook(wx.Notebook, ThemeMixin):
-    class CategoryPage(wx.Panel, ThemeMixin):
-        def __init__(self, parent, dlg, params):
+class ParamNotebook(wx.Notebook, handlers.ThemeMixin):
+    class CategoryPage(wx.Panel, handlers.ThemeMixin):
+        def __init__(self, parent, dlg, params, categ=None):
             wx.Panel.__init__(self, parent, size=(600, -1))
+            self.parent = parent
             self.parent = parent
             self.dlg = dlg
             self.app = self.dlg.app
+            self.categ = categ
             # Setup sizer
+            self.border = wx.BoxSizer()
+            self.SetSizer(self.border)
             self.sizer = wx.GridBagSizer(0, 0)
-            self.SetSizer(self.sizer)
-            # Add empty row for spacing
-            self.sizer.Add(wx.StaticText(self, label=""), (0, 0))
+            self.border.Add(self.sizer, border=12, proportion=1, flag=wx.ALL | wx.EXPAND)
             # Add controls
             self.ctrls = {}
-            self.row = 1
+            self.row = 0
             # Sort params
             sortedParams = OrderedDict(params)
             for name in reversed(self.parent.element.order):
@@ -441,14 +588,14 @@ class ParamNotebook(wx.Notebook, ThemeMixin):
                 if name in sortedParams:
                     startParams[name] = sortedParams.pop(name)
             if startParams:
-                self.addStartStopCtrl(startParams)
+                self.startCtrl = self.addStartStopCtrl(startParams)
             # Make stop controls
             stopParams = OrderedDict()
             for name in ['stopVal', 'stopType', 'durationEstim']:
                 if name in sortedParams:
                     stopParams[name] = sortedParams.pop(name)
             if stopParams:
-                self.addStartStopCtrl(stopParams)
+                self.stopCtrl = self.addStartStopCtrl(stopParams)
             # Make controls
             for name, param in sortedParams.items():
                 self.addParam(name, param)
@@ -477,6 +624,9 @@ class ParamNotebook(wx.Notebook, ThemeMixin):
             self.ctrls[name].setChangesCallback(self.doValidate)
             if name == 'name':
                 self.ctrls[name].valueCtrl.SetFocus()
+            # Some param ctrls need to grow with page
+            if param.inputType in ('multi', 'fileList'):
+                self.sizer.AddGrowableRow(self.row, proportion=1)
             # Iterate row
             self.row += 1
 
@@ -494,6 +644,8 @@ class ParamNotebook(wx.Notebook, ThemeMixin):
             # Iterate row
             self.row += 1
 
+            return panel
+
         def checkDepends(self, event=None):
             """Checks the relationships between params that depend on each other
 
@@ -504,13 +656,20 @@ class ParamNotebook(wx.Notebook, ThemeMixin):
              "true": "Enable",  # what to do with param if condition is True
              "false": "Disable",  # permitted: hide, show, enable, disable
             }"""
+            isChanged = False
             for thisDep in self.parent.element.depends:
                 if not (
-                        thisDep['param'] in self.ctrls
+                        thisDep['param'] in list(self.ctrls) + ['start', 'stop']
                         and thisDep['dependsOn'] in self.ctrls):
                     # If params are on another page, skip
                     continue
-                dependentCtrls = self.ctrls[thisDep['param']]
+                # Get associated ctrl
+                if thisDep['param'] == 'start':
+                    dependentCtrls = self.startCtrl
+                elif thisDep['param'] == 'stop':
+                    dependentCtrls = self.stopCtrl
+                else:
+                    dependentCtrls = self.ctrls[thisDep['param']]
                 dependencyCtrls = self.ctrls[thisDep['dependsOn']]
                 condString = "dependencyCtrls.getValue() {}".format(thisDep['condition'])
                 if eval(condString):
@@ -518,9 +677,23 @@ class ParamNotebook(wx.Notebook, ThemeMixin):
                 else:
                     action = thisDep['false']
                 if action == "hide":
+                    # Track change if changed
+                    if dependentCtrls.getVisible():
+                        isChanged = True
+                    # Apply visibiliy
                     dependentCtrls.setVisible(False)
                 elif action == "show":
+                    # Track change if changed
+                    if not dependentCtrls.getVisible():
+                        isChanged = True
                     dependentCtrls.setVisible(True)
+                elif action == "populate":
+                    # only repopulate if dependency ctrl has changed
+                    dependencyParam = self.parent.element.params[thisDep['dependsOn']]
+                    if dependencyParam.val != dependencyCtrls.getValue():
+                        dependencyParam.val = dependencyCtrls.getValue()
+                        if hasattr(dependentCtrls.valueCtrl, "populate"):
+                            dependentCtrls.valueCtrl.populate()
                 else:
                     # if action is "enable" then do ctrl.Enable() etc
                     for ctrlName in ['valueCtrl', 'nameCtrl', 'updatesCtrl']:
@@ -530,11 +703,12 @@ class ParamNotebook(wx.Notebook, ThemeMixin):
                                        .format(ctrlName, action.title()))
                             eval(evalStr)
             # Update sizer
-            self.sizer.SetEmptyCellSize((0, 0))
-            self.sizer.Layout()
-            self.Fit()
-            self.dlg.Fit()
-            self.Refresh()
+            if isChanged:
+                self.sizer.SetEmptyCellSize((0, 0))
+                self.sizer.Layout()
+                if isinstance(self.dlg, wx.Dialog):
+                    self.dlg.Fit()
+                self.Refresh()
 
         def doValidate(self, event=None):
             self.Validate()
@@ -573,10 +747,10 @@ class ParamNotebook(wx.Notebook, ThemeMixin):
         # Setup pages
         self.paramCtrls = {}
         for categ, params in paramsByCateg.items():
-            page = self.CategoryPage(self, self.parent, params)
+            page = self.CategoryPage(self, self.parent, params, categ=categ)
             self.paramCtrls.update(page.ctrls)
             # Add page to notebook
-            self.AddPage(page, categ)
+            self.AddPage(page, _translate(categ))
 
     def checkDepends(self, event=None):
         """
@@ -591,7 +765,14 @@ class ParamNotebook(wx.Notebook, ThemeMixin):
 
         The new data from the dlg get inserted back into the original params
         used in __init__ and are also returned from this method.
+        
+        .. note::
+            Don't use GetStringSelection() here to avoid that translated value
+            is returned. Instead, use GetSelection() to get index of selection
+            and get untranslated value from _choices attribute.
         """
+        # Create empty list to store fieldnames of params for deletion
+        killList = []
         # get data from input fields
         for fieldName in self.params:
             param = self.params[fieldName]
@@ -600,24 +781,45 @@ class ParamNotebook(wx.Notebook, ThemeMixin):
             # Get value
             if hasattr(ctrl, "getValue"):
                 param.val = ctrl.getValue()
-            elif isinstance(ctrl, wx.Choice):
-                param.val = ctrl.GetStringSelection()
             elif hasattr(ctrl, "GetValue"):
                 param.val = ctrl.GetValue()
+            elif isinstance(ctrl, wx.Choice):
+                if hasattr(ctrl, "_choices"):
+                    param.val = ctrl._choices[ctrl.GetSelection()]
+                else:
+                    # use GetStringSelection()
+                    # only if this control doesn't has _choices
+                    param.val = ctrl.GetStringSelection()
             # Get type
             if hasattr(ctrl, "typeCtrl"):
                 if ctrl.typeCtrl:
-                    param.valType = ctrl.typeCtrl.GetStringSelection()
+                    param.valType = ctrl.typeCtrl._choices[ctrl.typeCtrl.GetSelection()]
             # Get update type
             if hasattr(ctrl, "updateCtrl"):
                 if ctrl.updateCtrl:
-                    updates = ctrl.updateCtrl.GetStringSelection()
+                    updates = ctrl.updateCtrl._choices[ctrl.updateCtrl.GetSelection()]
                     # may also need to update a static
                     if param.updates != updates:
                         self._updateStaticUpdates(fieldName,
                                                   param.updates, updates)
                         param.updates = updates
+            # If requested, mark param for deletion
+            if hasattr(ctrl, "valueCtrl") and isinstance(ctrl.valueCtrl, paramCtrls.InvalidCtrl) and ctrl.valueCtrl.forDeletion:
+                killList.append(fieldName)
+        # Delete params on kill list
+        for fieldName in killList:
+            del self.params[fieldName]
         return self.params
+
+    def getCategoryIndex(self, categ):
+        """
+        Get page index for a given category
+        """
+        # iterate through pages by index
+        for i in range(self.GetPageCount()):
+            # if this page is the correct category, return current index
+            if self.GetPage(i).categ == categ:
+                return i
 
     def _updateStaticUpdates(self, fieldName, updates, newUpdates):
         """If the old/new updates ctrl is using a Static component then we
@@ -648,7 +850,7 @@ class _BaseParamsDlg(wx.Dialog):
                  showAdvanced=False,
                  size=wx.DefaultSize,
                  style=_style, editing=False,
-                 timeout=None):
+                 timeout=None, openToPage=None):
 
         # translate title
         if "name" in element.params:
@@ -685,6 +887,7 @@ class _BaseParamsDlg(wx.Dialog):
         self.showAdvanced = showAdvanced
         self.order = element.order
         self.depends = element.depends
+        self.plugin = element.plugin
         self.data = []
         # max( len(str(self.params[x])) for x in keys )
         self.maxFieldLength = 10
@@ -706,14 +909,32 @@ class _BaseParamsDlg(wx.Dialog):
 
         self.ctrls = ParamNotebook(self, element, experiment)
         self.paramCtrls = self.ctrls.paramCtrls
+        # open to page
+        if openToPage is not None:
+            i = self.ctrls.getCategoryIndex(openToPage)
+            self.ctrls.ChangeSelection(i)
 
         self.mainSizer.Add(self.ctrls,  # ctrls is the notebook of params
                            proportion=1, flag=wx.EXPAND | wx.ALL, border=5)
+        # if element came from a plugin that's not installed, add button to open plugins dlg
+        self.pluginBtn = HyperLinkCtrl(
+            self, label=_translate("Requires plugin {}, click here to install.").format(self.plugin)
+        )
+        self.pluginBtn.Bind(wx.EVT_BUTTON, self.jumpToPlugin)
+        self.mainSizer.Add(self.pluginBtn, border=6, flag=wx.CENTER | wx.ALL)
+        # show/hide button according to whether the plugin is installed or not
+        self.pluginBtn.Show(
+            self.plugin not in (None, "None", "") and self.plugin not in plugins.listPlugins()
+        )
 
         self.SetSizerAndFit(self.mainSizer)
 
     def getParams(self):
         return self.ctrls.getParams()
+
+    def jumpToPlugin(self, evt):
+        dlg = self.frame.openPluginManager()
+        dlg.jumpToPlugin(self.plugin)
 
     def openMonitorCenter(self, event):
         self.app.openMonitorCenter(event)
@@ -732,6 +953,15 @@ class _BaseParamsDlg(wx.Dialog):
         dlg = PsychoColorPicker(self.frame)
         dlg.ShowModal()
         dlg.Destroy()
+
+    @staticmethod
+    def showScreenNumbers(evt=None, dur=5):
+        """
+        Spawn some PsychoPy windows to display each monitor's number.
+        """
+        from psychopy.hardware import DeviceManager
+
+        DeviceManager.showScreenNumbers(dur=5)
 
     def onNewTextSize(self, event):
         self.Fit()  # for ExpandoTextCtrl this is needed
@@ -755,31 +985,28 @@ class _BaseParamsDlg(wx.Dialog):
                         border=3)
         self.OKbtn = wx.Button(self, wx.ID_OK, _translate(" OK "))
         # intercept OK button if a loop dialog, in case file name was edited:
-        if type(self) == DlgLoopProperties:
-            self.OKbtn.Bind(wx.EVT_BUTTON, self.onOK)
+        self.OKbtn.Bind(wx.EVT_BUTTON, self.onOK)
         self.OKbtn.SetDefault()
         CANCEL = wx.Button(self, wx.ID_CANCEL, _translate(" Cancel "))
 
         # Add validator stuff
-        self.warnings = WarningManager(self, self.OKbtn)
+        self.warnings = WarningManager(self)
         self.mainSizer.Add(self.warnings.output, border=3, flag=wx.EXPAND | wx.ALL)
         self.Validate()  # disables OKbtn if bad name, syntax error, etc
 
         buttons.AddStretchSpacer()
-        if sys.platform == 'darwin':
-            buttons.Add(CANCEL, 0,
-                        wx.ALL | wx.RIGHT | wx.ALIGN_CENTER_VERTICAL,
-                        border=3)
-            buttons.Add(self.OKbtn, 0,
-                        wx.ALL | wx.RIGHT | wx.ALIGN_CENTER_VERTICAL,
-                        border=3)
+
+        # Add Okay and Cancel buttons
+        if sys.platform == "win32":
+            btns = [self.OKbtn, CANCEL]
         else:
-            buttons.Add(self.OKbtn, 0,
-                        wx.ALL | wx.RIGHT | wx.ALIGN_CENTER_VERTICAL,
-                        border=3)
-            buttons.Add(CANCEL, 0,
-                        wx.ALL | wx.RIGHT | wx.ALIGN_CENTER_VERTICAL,
-                        border=3)
+            btns = [CANCEL, self.OKbtn]
+        buttons.Add(btns[0], 0,
+                    wx.ALL | wx.RIGHT | wx.ALIGN_CENTER_VERTICAL,
+                    border=3)
+        buttons.Add(btns[1], 0,
+                    wx.ALL | wx.RIGHT | wx.ALIGN_CENTER_VERTICAL,
+                    border=3)
 
         # buttons.Realize()
         # add to sizer
@@ -820,9 +1047,11 @@ class _BaseParamsDlg(wx.Dialog):
     def onOK(self, event=None):
         """Handler for OK button which should validate dialog contents.
         """
-        valid = self.Validate()
-        if not valid:
-            return
+        # run "on ok" validation for each ctrl
+        for ctrl in self.paramCtrls.values():
+            if hasattr(ctrl, "valueCtrl") and hasattr(ctrl.valueCtrl, "onOK"):
+                ctrl.valueCtrl.onOK()
+        
         event.Skip()
 
     def onTextEventCode(self, event=None):
@@ -949,7 +1178,7 @@ class _BaseParamsDlg(wx.Dialog):
                     "That name is in use (it's a %s). Try another name.")
                 return msg % _translate(used), False
             elif not namespace.isValid(newName):  # valid as a var name
-                msg = _translate("Name must be alpha-numeric or _, no spaces")
+                msg = _translate("Name must be alphanumeric or _, no spaces")
                 return msg, False
             # warn but allow, chances are good that its actually ok
             elif namespace.isPossiblyDerivable(newName):
@@ -978,6 +1207,7 @@ class DlgLoopProperties(_BaseParamsDlg):
                            pos, size, style)
         self.helpUrl = helpUrl
         self.frame = frame
+        self.expPath = Path(self.frame.filename).parent
         self.exp = frame.exp
         self.app = frame.app
         self.dpi = self.app.dpi
@@ -993,6 +1223,7 @@ class DlgLoopProperties(_BaseParamsDlg):
         self.mainSizer = wx.BoxSizer(wx.VERTICAL)
         self.conditions = None
         self.conditionsFile = None
+        self.condNamesInFile = []
         # create a valid new name; save old name in case we need to revert
         namespace = frame.exp.namespace
         defaultName = namespace.makeValid('trials')
@@ -1033,6 +1264,8 @@ class DlgLoopProperties(_BaseParamsDlg):
             self.currentType = 'interleaved staircases'
         elif loop.type == 'QuestHandler':
             pass  # what to do for quest?
+        # Store conditions file
+        self.conditionsOrig = self.conditions
         self.params['name'] = self.currentHandler.params['name']
         self.globalPanel = self.makeGlobalCtrls()
         self.stairPanel = self.makeStaircaseCtrls()
@@ -1064,6 +1297,9 @@ class DlgLoopProperties(_BaseParamsDlg):
         self.paramCtrls.update(self.constantsCtrls)
         self.paramCtrls.update(self.staircaseCtrls)
         self.paramCtrls.update(self.multiStairCtrls)
+
+        if "conditionsFile" in self.globalCtrls:
+            self.updateSummary()
 
         # show dialog and get most of the data
         self.show()
@@ -1098,7 +1334,62 @@ class DlgLoopProperties(_BaseParamsDlg):
             checker = ctrl.valueCtrl.GetValidator()
             if checker:
                 checker.Validate(self)
-        return bool(self.warnings._valid)
+        return self.warnings.OK
+
+    @property
+    def conditionsFile(self):
+        """
+        Location of the conditions file, in whatever format it is best available in. Ideally
+        relative to the experiment path, but if this is not possible, then absolute.
+        """
+        if not hasattr(self, "_conditionsFile") or self._conditionsFile is None:
+            # If no file, return None
+            return None
+        elif "$" in str(self._conditionsFile):
+            # If a variabel, return as string
+            return str(self._conditionsFile)
+        else:
+            # Otherwise return as unix string
+            return str(self._conditionsFile).replace("\\", "/")
+
+    @conditionsFile.setter
+    def conditionsFile(self, value):
+        # Store last value
+        self.conditionsFileOrig = self.conditionsFileAbs
+
+        if value in (None, ""):
+            # Store None as is
+            self._conditionsFile = None
+        elif "$" in str(value):
+            # Store variable as is
+            self._conditionsFile = str(value)
+        else:
+            # Otherwise convert to Path
+            value = Path(value)
+            try:
+                # Relativise if possible
+                self._conditionsFile = value.relative_to(self.expPath)
+            except ValueError:
+                # Otherwise as is
+                self._conditionsFile = value
+
+    @property
+    def conditionsFileAbs(self):
+        """
+        Absolute path to the conditions file
+        """
+        if not hasattr(self, "_conditionsFile") or self._conditionsFile is None:
+            # If no file, return None
+            return None
+        elif "$" in str(self._conditionsFile):
+            # If variable. return as is
+            return str(self._conditionsFile)
+        elif self._conditionsFile.is_absolute():
+            # Return as is if absolute
+            return str(self._conditionsFile)
+        else:
+            # Append to experiment path if relative
+            return str(self.expPath / self._conditionsFile)
 
     def makeGlobalCtrls(self):
         panel = wx.Panel(parent=self)
@@ -1169,23 +1460,24 @@ class DlgLoopProperties(_BaseParamsDlg):
                     text, OK = self.getTrialsSummary(_cond)
                 else:
                     text = _translate("No parameters set")
-                    OK = True # No condition file is not an error
                 # we'll create our own widgets
                 ctrls = ParamCtrls(dlg=self, parent=panel, label=label,
                                    fieldName=fieldName,
                                    param=text, noCtrls=True)
                 ctrls.valueCtrl = wx.StaticText(
                     panel, label=text, style=wx.ALIGN_RIGHT)
-                if OK:
-                    ctrls.valueCtrl.SetForegroundColour("Black")
-                else:
-                    ctrls.valueCtrl.SetForegroundColour("Red")
-                if hasattr(ctrls.valueCtrl, "_szr"):
-                    panelSizer.Add(ctrls.valueCtrl._szr, (row, 1),
-                                   flag=wx.ALIGN_RIGHT)
-                else:
-                    panelSizer.Add(ctrls.valueCtrl, (row, 1),
-                                   flag=wx.ALIGN_RIGHT)
+                ctrls.valueCtrl._szr = wx.BoxSizer(wx.HORIZONTAL)
+                ctrls.valueCtrl._szr.Add(ctrls.valueCtrl)
+                panelSizer.Add(ctrls.valueCtrl._szr, (row, 1),
+                               flag=wx.ALIGN_RIGHT)
+                # create refresh button
+                ctrls.refreshBtn = wx.Button(panel, style=wx.BU_EXACTFIT | wx.BORDER_NONE)
+                ctrls.refreshBtn.SetBitmap(
+                    icons.ButtonIcon("view-refresh", size=16).bitmap
+                )
+                ctrls.refreshBtn.Bind(wx.EVT_BUTTON, self.updateSummary)
+                ctrls.valueCtrl._szr.Prepend(ctrls.refreshBtn, border=12, flag=wx.LEFT | wx.RIGHT | wx.ALIGN_TOP)
+
                 row += 1
             else:  # normal text entry field
                 ctrls = ParamCtrls(dlg=self, parent=panel, label=label,
@@ -1200,6 +1492,7 @@ class DlgLoopProperties(_BaseParamsDlg):
             # Link conditions file browse button to its own special method
             if fieldName == 'conditionsFile':
                 ctrls.valueCtrl.findBtn.Bind(wx.EVT_BUTTON, self.onBrowseTrialsFile)
+                ctrls.setChangesCallback(self.setNeedUpdate)
             # store info about the field
             self.constantsCtrls[fieldName] = ctrls
         panelSizer.AddGrowableCol(1, 1)
@@ -1328,7 +1621,21 @@ class DlgLoopProperties(_BaseParamsDlg):
             # annoying for novice)
             paramStr = "["
             for param in conditions[0]:
+                # check for namespace clashes
+                clashes = self.exp.namespace.getCategories(param)
+                if clashes:
+                    alert(4705, strFields={
+                        'param': param,
+                        'category': ", ".join(clashes)
+                    })
                 paramStr += (str(param) + ', ')
+                # check for derivables
+                derivable = self.exp.namespace.isPossiblyDerivable(param)
+                if derivable:
+                    alert(4710, strFields={
+                        'param': param,
+                        'msg': derivable
+                    })
             paramStr = paramStr[:-2] + "]"  # remove final comma and add ]
             # generate summary info
             msg = _translate('%(nCondition)i conditions, with %(nParam)i '
@@ -1373,7 +1680,10 @@ class DlgLoopProperties(_BaseParamsDlg):
     @property
     def type(self):
         """What type of loop is represented by this dlg"""
-        return self.currentHandler.type
+        if self.currentHandler.type == "MultiStairHandler":
+            return "MultiStairHandler:" + self.currentHandler.params['stairType'].val
+        else:
+            return self.currentHandler.type
 
     @type.setter
     def type(self, value):
@@ -1388,64 +1698,71 @@ class DlgLoopProperties(_BaseParamsDlg):
     def onBrowseTrialsFile(self, event):
         self.conditionsFileOrig = self.conditionsFile
         self.conditionsOrig = self.conditions
-        expFolder, expName = os.path.split(self.frame.filename)
         dlg = wx.FileDialog(self, message=_translate("Open file ..."),
-                            style=wx.FD_OPEN, defaultDir=expFolder)
+                            style=wx.FD_OPEN, defaultDir=str(self.expPath))
         if dlg.ShowModal() == wx.ID_OK:
-            newFullPath = dlg.GetPath()
-            if self.conditionsFile:
-                _path = os.path.join(expFolder, self.conditionsFile)
-                oldFullPath = os.path.abspath(_path)
-                isSameFilePathAndName = bool(newFullPath == oldFullPath)
-            else:
-                isSameFilePathAndName = False
+            self.conditionsFile = dlg.GetPath()
+            self.currentCtrls['conditionsFile'].valueCtrl.SetValue(
+                self.conditionsFile
+            )
+            self.updateSummary()
 
-            newPath = str(Path(newFullPath).relative_to(expFolder))
-            self.conditionsFile = newPath
-            needUpdate = False
+    def setNeedUpdate(self, evt=None):
+        """
+        Mark that conditions need an update, i.e. enable the refresh button
+        """
+        self.constantsCtrls['conditions'].refreshBtn.Enable()
+
+    def updateSummary(self, evt=None):
+        """
+        Figure out what conditions we can get from the file and display them, or an error
+        or message, as appropriate. Upon completion this will disable the update button as
+        we are now up to date.
+        """
+        self.conditionsFile = self.currentCtrls['conditionsFile'].valueCtrl.GetValue()
+        # Check whether the file and path are the same as previously
+        isSameFilePathAndName = self.conditionsFileAbs == self.conditionsFileOrig
+        # Start off with no message and assumed valid
+        msg = ""
+        valid = True
+        if self.conditionsFile in (None, ""):
+            # If no conditions file, no message
+            msg = ""
+            valid = True
+        elif "$" in str(self.conditionsFile):
+            # If set from a variable, message but no error
+            msg = _translate("Conditions file set from variable.")
+            valid = True
+        else:
+            duplCondNames = []
             try:
-                _c, _n = data.importConditions(dlg.GetPath(),
+                _c, _n = data.importConditions(self.conditionsFileAbs.strip(),
                                                returnFieldNames=True)
                 self.conditions, self.condNamesInFile = _c, _n
-                needUpdate = True
-            except (ImportError, ValueError) as msg:
-                msg = str(msg)
-                if msg.startswith('Could not open'):
-                    msg = _translate('Could not read conditions from:\n')
-                    _file = newFullPath.split(os.path.sep)[-1]
-                    self.currentCtrls['conditions'].setValue(msg + _file)
-                    self.currentCtrls['conditions'].valueCtrl.SetForegroundColour("Red")
+                msg, valid = self.getTrialsSummary(self.conditions)
+            except exceptions.ConditionsImportError as err:
+                # If import conditions errors, then value is not valid
+                valid = False
+                errMsg = str(err)
+                mo = re.search(r'".+\.[0-9]+"$', errMsg)
+                if "Could not open" in errMsg:
+                    msg = _translate('Could not read conditions from: %s\n') % self.conditionsFile
+                    logging.error('Could not open as a conditions file: %s' % self.conditionsFileAbs)
+                elif "Bad name:" in errMsg and "punctuation" in errMsg and mo:
+                    # column name is something like "stim.1", which may
+                    # be in conditionsFile or generated by pandas when
+                    # duplicated column names are found.
+                    msg = _translate(
+                        'Bad name in %s: Parameters (column headers) cannot contain dots or be duplicated.'
+                    ) % self.conditionsFile
                     logging.error(
-                        'Could not open as a conditions file: %s' % newFullPath)
+                        ('Bad name in %s: Parameters (column headers) cannot contain dots or be '
+                         'duplicated.') % self.conditionsFileAbs
+                    )
                 else:
-                    mo = re.search(r'".+\.[0-9]+"$', msg)
-                    if 'cannot contain punctuation or spaces' in msg and mo:
-                        # column name is something like "stim.1", which may
-                        # be in conditionsFile or generated by pandas when
-                        # duplicated column names are found.
-                        m2 = 'Parameters (column headers) cannot contain dots' \
-                             ' or be duplicated.'
-                    else:
-                        # other exceptions
-                        sep2 = os.linesep * 2
-                        m2 = msg.replace(
-                            'Conditions file ','').replace(': ', sep2)
-                    # Display error message dialog
-                    _title = _translate(
-                        'Configuration error in conditions file')
-                    dlgErr = dialogs.MessageDialog(
-                        parent=self.frame, message=m2,
-                        type='Info', title=_title).ShowModal()
-                    msg = _translate('Bad condition name(s) in file:\n')
-                    val = msg + newFullPath.split(os.path.sep)[-1]
-                    self.currentCtrls['conditions'].setValue(val)
-                    self.currentCtrls['conditions'].valueCtrl.SetForegroundColour("Red")
-                    msg = 'Rejected bad condition name(s) in file: %s'
-                    logging.error(msg % newFullPath)
-                self.conditionsFile = self.conditionsFileOrig
-                self.conditions = self.conditionsOrig
-                return  # no update or display changes
-            
+                    msg = err.translated
+                    logging.error(msg)
+
             # check for Builder variables
             builderVariables = []
             for condName in self.condNamesInFile:
@@ -1453,17 +1770,13 @@ class DlgLoopProperties(_BaseParamsDlg):
                     builderVariables.append(condName)
             if builderVariables:
                 msg = _translate('Builder variable(s) ({}) in file:{}').format(
-                    ','.join(builderVariables), newFullPath.split(os.path.sep)[-1])
-                self.currentCtrls['conditions'].setValue(msg)
-                self.currentCtrls['conditions'].valueCtrl.SetForegroundColour("Red")
-                msg = 'Rejected Builder variable(s) ({}) in file:{}'.format(
-                    ','.join(builderVariables), newFullPath.split(os.path.sep)[-1])
+                    ','.join(builderVariables), self.conditionsFile)
                 logging.error(msg)
-                self.conditionsFile = self.conditionsFileOrig
-                self.conditions = self.conditionsOrig
-                return  # no update or display changes
-            
-            duplCondNames = []
+                valid = False
+                msg = 'Rejected Builder variable(s) ({}) in file:{}'.format(
+                    ','.join(builderVariables), self.conditionsFile)
+                logging.error(msg)
+
             if len(self.condNamesInFile):
                 for condName in self.condNamesInFile:
                     if self.exp.namespace.exists(condName):
@@ -1474,36 +1787,38 @@ class DlgLoopProperties(_BaseParamsDlg):
                 duplCondNamesStr = duplCondNamesStr[:39] + '...'
             if len(duplCondNames):
                 if isSameFilePathAndName:
-                    msg = ('Assuming reloading file: same filename and '
-                           'duplicate condition names in file: %s')
-                    logging.info(msg % self.conditionsFile)
+                    logging.info(
+                        'Assuming reloading file: same filename and '
+                        'duplicate condition names in file: %s' % self.conditionsFile)
                 else:
-                    self.currentCtrls['conditionsFile'].setValue(newPath)
-                    val = ('Warning: Condition names conflict with existing'
+                    self.currentCtrls['conditionsFile'].setValue(self.conditionsFile or "")
+                    logging.warning(
+                        'Warning: Condition names conflict with existing'
                            ':\n[' + duplCondNamesStr + ']\nProceed'
-                           ' anyway? (= safe if these are in old file)')
-                    self.currentCtrls['conditions'].setValue(val)
-                    self.currentCtrls['conditions'].valueCtrl.SetForegroundColour("Red")
-                    msg = ('Duplicate condition names, different '
-                           'conditions file: %s')
-                    logging.warning(msg % duplCondNamesStr)
+                           ' anyway? (= safe if these are in old file)'
+                    )
+                    valid = False
+                    msg = _translate(
+                        'Duplicate condition names, different '
+                        'conditions file: %s'
+                    ) % duplCondNamesStr
             # stash condition names but don't add to namespace yet, user can
             # still cancel
             # add after self.show() in __init__:
             self.duplCondNames = duplCondNames
 
-            if (needUpdate
-                    or ('conditionsFile' in list(self.currentCtrls.keys())
-                        and not duplCondNames)):
-                self.currentCtrls['conditionsFile'].setValue(newPath)
-                msg, OK = self.getTrialsSummary(self.conditions)
-                self.currentCtrls['conditions'].setValue(msg)
-                if OK:
-                    self.currentCtrls['conditions'].valueCtrl.SetForegroundColour("Black")
-                else:
-                    self.currentCtrls['conditions'].valueCtrl.SetForegroundColour("Red")
-                self.Layout()
-                self.Fit()
+        # Update ctrl value in case it's been abbreviated by conditionsFile setter
+        self.currentCtrls['conditionsFile'].setValue(self.conditionsFile or "")
+        # Do actual value setting
+        self.currentCtrls['conditions'].setValue(msg)
+        if valid:
+            self.currentCtrls['conditions'].valueCtrl.SetForegroundColour("Black")
+        else:
+            self.currentCtrls['conditions'].valueCtrl.SetForegroundColour("Red")
+        self.Layout()
+        self.Fit()
+        # Disable update button now that we're up to date
+        self.constantsCtrls['conditions'].refreshBtn.Disable()
 
     def getParams(self):
         """Retrieves data and re-inserts it into the handler and returns
@@ -1515,7 +1830,7 @@ class DlgLoopProperties(_BaseParamsDlg):
                 continue  # this was deprecated in v1.62.00
             param = self.currentHandler.params[fieldName]
             if fieldName in ['conditionsFile']:
-                param.val = self.conditionsFile
+                param.val = self.conditionsFile or ""
                 # not the value from ctrl - that was abbreviated
                 # see onOK() for partial handling = check for '...'
             else:  # most other fields
@@ -1529,53 +1844,10 @@ class DlgLoopProperties(_BaseParamsDlg):
                     param.updates = ctrls.getUpdates()
         return self.currentHandler.params
 
-    def refreshConditions(self):
-        """user might have manually edited the conditionsFile name,
-        which in turn affects self.conditions and namespace. It's harder
-        to handle changes to long names that have been abbrev()'d, so
-        skip them (names containing '...').
-        """
-        val = self.currentCtrls['conditionsFile'].valueCtrl.GetValue()
-        if val.find('...') == -1 and self.conditionsFile != val:
-            self.conditionsFile = val
-            if self.conditions:
-                self.exp.namespace.remove(list(self.conditions[0].keys()))
-            if os.path.isfile(self.conditionsFile):
-                try:
-                    self.conditions = data.importConditions(
-                        self.conditionsFile)
-                    msg, OK = self.getTrialsSummary(self.conditions)
-                    self.currentCtrls['conditions'].setValue(msg)
-                    if OK:
-                        self.currentCtrls['conditions'].valueCtrl.SetForegroundColour("Black")
-                    else:
-                        self.currentCtrls['conditions'].valueCtrl.SetForegroundColour("Red")
-                except (ImportError, ValueError) as e:
-                    msg1 = _translate(
-                        'Badly formed condition name(s) in file:\n')
-                    msg2 = _translate('.\nNeed to be legal as var name; '
-                                      'edit file, try again.')
-                    val = msg1 + str(e).replace(':', '\n') + msg2
-                    self.currentCtrls['conditions'].setValue(val)
-                    self.currentCtrls['conditions'].valueCtrl.SetForegroundColour("Red")
-                    self.conditions = ''
-                    msg3 = 'Reject bad condition name in conditions file: %s'
-                    logging.error(msg3 % str(e).split(':')[0])
-            else:
-                self.conditions = None
-                self.currentCtrls['conditions'].setValue(_translate(
-                    "No parameters set (conditionsFile not found)"))
-                self.currentCtrls['conditions'].valueCtrl.SetForegroundColour("Red")
-        else:
-            msg = ('DlgLoop: could not determine if a condition'
-                   ' filename was edited')
-            logging.debug(msg)
-            # self.currentCtrls['conditions'] could be misleading here
-
     def onOK(self, event=None):
         # intercept OK in case user deletes or edits the filename manually
         if 'conditionsFile' in self.currentCtrls:
-            self.refreshConditions()
+            self.updateSummary()
         event.Skip()  # do the OK button press
 
 
@@ -1585,23 +1857,17 @@ class DlgComponentProperties(_BaseParamsDlg):
                  suppressTitles=True, size=wx.DefaultSize,
                  style=wx.DEFAULT_DIALOG_STYLE | wx.DIALOG_NO_PARENT,
                  editing=False,
-                 timeout=None, testing=False, type=None):
+                 timeout=None, testing=False, type=None,
+                 openToPage=None):
         style = style | wx.RESIZE_BORDER
         self.type = type or element.type
         _BaseParamsDlg.__init__(self, frame=frame, element=element, experiment=experiment,
                                 size=size,
                                 style=style, editing=editing,
-                                timeout=timeout)
+                                timeout=timeout, openToPage=openToPage)
         self.frame = frame
         self.app = frame.app
         self.dpi = self.app.dpi
-
-        # for input devices:
-        if 'storeCorrect' in self.params:
-            # do this just to set the initial values to be
-            self.onStoreCorrectChange(event=None)
-            self.Bind(wx.EVT_CHECKBOX, self.onStoreCorrectChange,
-                      self.paramCtrls['storeCorrect'].valueCtrl)
 
         # for all components
         self.show(testing)
@@ -1609,18 +1875,6 @@ class DlgComponentProperties(_BaseParamsDlg):
             if self.OK:
                 self.params = self.getParams()  # get new vals from dlg
             self.Destroy()
-
-    def onStoreCorrectChange(self, event=None):
-        """store correct has been checked/unchecked. Show or hide the
-        correctAns field accordingly
-        """
-        if self.paramCtrls['storeCorrect'].valueCtrl.GetValue():
-            self.paramCtrls['correctAns'].valueCtrl.Enable()
-        else:
-            self.paramCtrls['correctAns'].valueCtrl.Disable()
-        self.mainSizer.Layout()
-        self.Fit()
-        self.Refresh()
 
 
 class DlgExperimentProperties(_BaseParamsDlg):
@@ -1645,10 +1899,21 @@ class DlgExperimentProperties(_BaseParamsDlg):
         self.Bind(wx.EVT_CHECKBOX, self.onFullScrChange,
                   self.paramCtrls['Full-screen window'].valueCtrl)
 
+        # Add button to show screen numbers
+        scrNumCtrl = self.paramCtrls['Screen'].valueCtrl
+        self.screenNsBtn = wx.Button(scrNumCtrl.GetParent(), label=_translate("Show screen numbers"))
+        scrNumCtrl._szr.Add(self.screenNsBtn, border=5, flag=wx.ALIGN_CENTER_VERTICAL | wx.RIGHT | wx.LEFT)
+        scrNumCtrl.Layout()
+        self.screenNsBtn.Bind(wx.EVT_BUTTON, self.showScreenNumbers)
+
+        if timeout is not None:
+            wx.FutureCall(timeout, self.Destroy)
+
         # for all components
         self.show()
         if self.OK:
             self.params = self.getParams()  # get new vals from dlg
+
         self.Destroy()
 
     def onFullScrChange(self, event=None):
@@ -1676,9 +1941,98 @@ class DlgExperimentProperties(_BaseParamsDlg):
             self.paramCtrls[field].param.val = size
             self.paramCtrls[field].valueCtrl.Disable()
             self.paramCtrls[field].nameCtrl.Disable()
+            # enable show/hide mouse
+            self.paramCtrls['Show mouse'].valueCtrl.Enable()
+            self.paramCtrls['Show mouse'].nameCtrl.Enable()
         else:
             self.paramCtrls['Window size (pixels)'].valueCtrl.Enable()
             self.paramCtrls['Window size (pixels)'].nameCtrl.Enable()
+            # set show mouse to visible and disable control
+            self.paramCtrls['Show mouse'].valueCtrl.Disable()
+            self.paramCtrls['Show mouse'].nameCtrl.Disable()
         self.mainSizer.Layout()
         self.Fit()
         self.Refresh()
+
+
+class DlgNewRoutine(wx.Dialog):
+
+    def __init__(self, parent, pos=wx.DefaultPosition, size=(512, -1),
+                 style=wx.DEFAULT_DIALOG_STYLE | wx.DIALOG_NO_PARENT):
+        self.parent = parent  # parent is probably the RoutinesNotebook (not the BuilderFrame)
+        self.app = parent.app
+        if hasattr(parent, 'frame'):
+            self.frame = parent.frame
+        else:
+            self.frame = parent
+        # Initialise dlg
+        wx.Dialog.__init__(self, parent, title=_translate("New Routine"), name=_translate("New Routine"),
+                           size=size, pos=pos, style=style)
+        # Setup sizer
+        self.border = wx.BoxSizer(wx.VERTICAL)
+        self.SetSizer(self.border)
+        self.sizer = wx.FlexGridSizer(cols=2, vgap=0, hgap=6)
+        self.border.Add(self.sizer, border=12, proportion=1, flag=wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP)
+        # Get templates
+        self.templates = self.frame.routineTemplates
+        self.templatesByID = {}
+        self.selectedTemplate = self.templates['Basic']['blank']  # until we know otherwise
+        # New name ctrl
+        self.nameLbl = wx.StaticText(self, -1, _translate("New Routine name:"))
+        self.sizer.Add(self.nameLbl, border=6, flag=wx.ALL | wx.ALIGN_RIGHT)
+        self.nameCtrl = wx.TextCtrl(self, -1, "", size=(200, -1))
+        self.nameCtrl.SetToolTip(_translate(
+            "What is the name for the new Routine? (e.g. instr, trial, feedback)"
+        ))
+        self.sizer.Add(self.nameCtrl, border=6, flag=wx.ALL | wx.ALIGN_TOP | wx.EXPAND)
+        # Template picker
+        self.templateLbl = wx.StaticText(self, -1, _translate("Routine Template:"))
+        self.sizer.Add(self.templateLbl, border=6, flag=wx.ALL | wx.ALIGN_RIGHT)
+        self.templateCtrl = wx.Button(self, -1, "Basic:blank", size=(200, -1))
+        self.templateCtrl.SetToolTip(_translate(
+            "Select a template to base your new Routine on"
+        ))
+        self.templateCtrl.Bind(wx.EVT_BUTTON, self.showTemplatesContextMenu)
+        self.sizer.Add(self.templateCtrl, border=6, flag=wx.ALL | wx.ALIGN_TOP | wx.EXPAND)
+        # Buttons
+        self.btnSizer = wx.StdDialogButtonSizer()
+        self.CANCEL = wx.Button(self, wx.ID_CANCEL, "Cancel")
+        self.btnSizer.AddButton(self.CANCEL)
+        self.OK = wx.Button(self, wx.ID_OK, "OK")
+        self.btnSizer.AddButton(self.OK)
+        self.btnSizer.Realize()
+        self.border.Add(self.btnSizer, border=12, flag=wx.ALL | wx.ALIGN_RIGHT)
+
+        self.Fit()
+        self.Center()
+
+    def showTemplatesContextMenu(self, evt):
+        self.templateMenu = wx.Menu()
+        self.templateMenu.Bind(wx.EVT_MENU, self.onSelectTemplate)
+        self.templatesByID = {}
+        for categName, categDict in self.templates.items():
+            submenu = wx.Menu()
+            self.templateMenu.Append(wx.ID_ANY, categName, submenu)
+            for templateName, routine in categDict.items():
+                id = wx.NewIdRef()
+                self.templatesByID[id] = {
+                    'routine': routine,
+                    'name': templateName,
+                    'categ': categName,
+                }
+                item = submenu.Append(id, templateName)
+
+        btnPos = self.templateCtrl.GetRect()
+        menuPos = (btnPos[0], btnPos[1] + btnPos[3])
+        self.PopupMenu(self.templateMenu, menuPos)
+
+    def onSelectTemplate(self, evt):
+
+        id = evt.Id
+        categ = self.templatesByID[id]['categ']
+        templateName = self.templatesByID[id]['name']
+        self.templateCtrl.SetLabelText(f"{categ}: {templateName}")
+        self.selectedTemplate = self.templates[categ][templateName]
+        self.Layout()  # update the size of the button
+        self.Fit()
+        # self.templateMenu.Destroy()  # destroy to avoid mem leak

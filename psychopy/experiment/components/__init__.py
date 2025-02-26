@@ -2,31 +2,36 @@
 # -*- coding: utf-8 -*-
 
 # Part of the PsychoPy library
-# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2021 Open Science Tools Ltd.
+# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2024 Open Science Tools Ltd.
 # Distributed under the terms of the GNU General Public License (GPL).
 
-"""Extensible set of components for the PsychoPy Builder view
+"""Extensible set of components for the PsychoPy Builder view.
 """
 
-from __future__ import absolute_import, print_function
-
-from builtins import str
-from past.builtins import basestring
+import sys
 import os
 import glob
 import copy
 import shutil
 from os.path import join, dirname, abspath, split
 from importlib import import_module  # helps python 2.7 -> 3.x migration
-from ._base import BaseVisualComponent, BaseComponent
+from ._base import BaseVisualComponent, BaseComponent, BaseDeviceComponent
 from ..params import Param
 from psychopy.localization import _translate
 from psychopy.experiment import py2js
+import psychopy.logging as logging
 
-excludeComponents = ['BaseComponent', 'BaseVisualComponent', 'BaseStandaloneRoutine'  # templates only
-                     ]  # this one isn't ready yet
+excludeComponents = [
+    'BaseComponent',
+    'BaseVisualComponent',
+    'BaseDeviceComponent',
+    'BaseStandaloneRoutine'  # templates only
+]  # this one isn't ready yet
 
-pluginComponents = {}  # components registered by loaded plugins
+# Plugin components are added dynamically at runtime, usually from plugin
+# packages. These are managed by a different system than 'legacy'
+# components.
+pluginComponents = {}
 
 # try to remove old pyc files in case they're detected as components
 pycFiles = glob.glob(join(split(__file__)[0], "*.pyc"))
@@ -39,26 +44,79 @@ for filename in pycFiles:
             pass  # may not have sufficient privs
 
 
+def addComponent(compClass):
+    """Add a component to Builder.
+
+    This function will override any component already loaded with the same
+    class name. Usually, this function is called by the plugin system. The user
+    typically does not need to call this.
+
+    Parameters
+    ----------
+    compClass : object
+        Component class. Should be a subclass of `BaseComponent`.
+
+    """
+    global pluginComponents  # components loaded at runtime
+
+    compName = compClass.__name__
+    logging.debug("Registering Builder component class `{}`.".format(compName))
+
+    # check type and attributes of the class
+    if not issubclass(compClass, (BaseComponent, BaseVisualComponent)):
+        return
+    elif not hasattr(compClass, 'categories'):
+        logging.warning(
+            "Component `{}` does not define a `.categories` attribute.".format(
+                compName))
+
+    pluginComponents[compName] = compClass
+
+
 def getAllCategories(folderList=()):
+    """Get all component categories.
+
+    Parameters
+    ----------
+    folderList : list or tuple
+        List of directories to search for components. These are for
+        'legacy'-style components. Using plugins is now the prefered method of
+        adding components to Builder.
+
+    Returns
+    -------
+    list of str
+        Names of all categories which the working set of components specify.
+
+    """
     allComps = getAllComponents(folderList)
     # Hardcode some categories to always appear first/last
-    firstCats = ['Favorites', 'Stimuli', 'Responses']
-    lastCats = ['Custom', 'I/O']
+    firstCats = ['Favorites', 'Stimuli', 'Responses', 'Custom']
+    lastCats = ['I/O', 'Other']
     # Start getting categories
     allCats = firstCats
     for name, thisComp in list(allComps.items()):
         for thisCat in thisComp.categories:
             if thisCat not in allCats + lastCats:
                 allCats.append(thisCat)
+
     return allCats + lastCats
 
 
 def getAllComponents(folderList=(), fetchIcons=True):
-    """Get a dictionary of all available components, from the builtins as well
-    as all folders in the folderlist.
+    """Get all available components, from the builtins, plugins and folders.
+
     User-defined components will override built-ins with the same name.
+
+    Parameters
+    ----------
+    folderList : list or tuple
+        List of directories to search for components.
+    fetchIcons : bool
+        Whether to also fetch icons. Default is `True`.
+
     """
-    if isinstance(folderList, basestring):
+    if isinstance(folderList, str):
         raise TypeError('folderList should be iterable, not a string')
     components = getComponents(fetchIcons=fetchIcons)  # get the built-ins
     for folder in folderList:
@@ -103,6 +161,7 @@ def getComponents(folder=None, fetchIcons=True):
     importing from psychopy:
        `from psychopy.experiment.components import BaseComponent, Param`
     """
+
     if folder is None:
         pth = folder = dirname(__file__)
         pkg = 'psychopy.experiment.components'
@@ -130,8 +189,9 @@ def getComponents(folder=None, fetchIcons=True):
                     if f.startswith('_'):
                         continue
                     shutil.copy(f, folder)
-    if not pth in os.sys.path:
-        os.sys.path.insert(0, pth)
+
+    if pth not in sys.path:
+        sys.path.insert(0, pth)
 
     components = {}
 
@@ -148,7 +208,6 @@ def getComponents(folder=None, fetchIcons=True):
         # module = imp.load_source(file[:-3], fullPath)
         # v1.83.00 used exec(implicit-relative), no go for python3:
         # exec('import %s as module' % file[:-3])
-
         # importlib.import_module eases 2.7 -> 3.x migration
         if cmpfile.endswith('.py'):
             explicit_rel_path = pkg + '.' + cmpfile[:-3]
@@ -157,7 +216,11 @@ def getComponents(folder=None, fetchIcons=True):
         try:
             module = import_module(explicit_rel_path, package=pkg)
         except ImportError:
+            logging.error(
+                'Failed to load component package `{}`. Does it have a '
+                '`__init__.py`?'.format(cmpfile))
             continue  # not a valid module (no __init__.py?)
+            
         # check for orphaned pyc files (__file__ is not a .py file)
         if hasattr(module, '__file__'):
             if not module.__file__:
@@ -174,8 +237,7 @@ def getComponents(folder=None, fetchIcons=True):
         for attrib in dir(module):
             name = None
             # fetch the attribs that end with 'Component'
-            if (attrib.endswith('omponent') and
-                    attrib not in excludeComponents):
+            if attrib.endswith('omponent') and attrib not in excludeComponents:
                 name = attrib
                 components[attrib] = getattr(module, attrib)
 
@@ -190,8 +252,8 @@ def getComponents(folder=None, fetchIcons=True):
                 # assign the module categories to the Component
                 if not hasattr(components[attrib], 'categories'):
                     components[attrib].categories = ['Custom']
-    return components
 
+    return components
 
 
 def getInitVals(params, target="PsychoPy"):
@@ -199,6 +261,19 @@ def getInitVals(params, target="PsychoPy"):
     __init__ of a stimulus object, avoiding using a variable name if possible
     """
     inits = copy.deepcopy(params)
+    # Alias units = from exp settings with None
+    if 'units' in inits and str(inits['units'].val).lower() in (
+            "from experiment settings",
+            "from exp settings",
+            "none"
+    ):
+        if target == "PsychoJS":
+            inits['units'].val = "psychoJS.window.units"
+        else:
+            inits['units'].val = "win.units"
+
+        inits['units'].valType = 'code'
+
     for name in params:
         if target == "PsychoJS":
             # convert (0,0.5) to [0,0.5] but don't convert "rand()" to "rand[]" and don't convert text
@@ -212,6 +287,14 @@ def getInitVals(params, target="PsychoPy"):
                     inits[name].val = ("psychoJS.resourceManager.getResource({})"
                                        .format(inits[name]))
                     inits[name].valType = 'code'
+
+        if name == "deviceLabel":
+            if "name" in inits and not params[name]:
+                # if deviceName exists but is blank, use component name
+                inits[name].val = inits['name'].val
+            # make a code version of device name
+            inits['deviceLabelCode'] = copy.copy(inits[name])
+            inits['deviceLabelCode'].valType = "code"
 
         if not hasattr(inits[name], 'updates'):  # might be settings parameter instead
             continue
@@ -244,10 +327,16 @@ def getInitVals(params, target="PsychoPy"):
                       'contrast', 'moddepth', 'envori', 'envphase', 'envsf',
                       'noiseClip', 'noiseBWO', 'noiseFilterUpper', 'noiseFilterLower',
                       'noiseBaseSf', 'noiseBW', 'noiseElementSize', 'noiseFilterOrder',
-                      'noiseFractalPower']:
+                      'noiseFractalPower', 'zoom']:
             inits[name].val = "1.0"
             inits[name].valType = 'code'
-        elif name in ['image', 'mask', 'envelope', 'carrier']:
+        elif name in ['progress']:
+            inits[name].val = "0.0"
+            inits[name].valType = 'code'
+        elif name in ['image']:
+            inits[name].val = "default.png"
+            inits[name].valType = 'str'
+        elif name in ['mask', 'envelope', 'carrier']:
             inits[name].val = "sin"
             inits[name].valType = 'str'
         elif name == 'texture resolution':
@@ -262,7 +351,7 @@ def getInitVals(params, target="PsychoPy"):
         elif name == 'units':
             inits[name].val = "norm"
             inits[name].valType = 'str'
-        elif name == 'text':
+        elif name in ('text', 'placeholder'):
             inits[name].val = ""
             inits[name].valType = 'str'
         elif name == 'flip':
@@ -283,21 +372,38 @@ def getInitVals(params, target="PsychoPy"):
         elif name == 'noiseType':
             inits[name].val = 'Binary'
             inits[name].valType = 'str'
-        elif name == 'marker_label':
+        elif name == 'emotiv_marker_label':
             inits[name].val = 'Label'
             inits[name].valType = 'str'
-        elif name == 'marker_value':
+        elif name == 'emotiv_marker_value':
             inits[name].val = 'Value'
             inits[name].valType = 'str'
         elif name == 'buttonRequired':
             inits[name].val = "True"
             inits[name].valType = 'code'
+        elif name == 'vertices':
+            inits[name].val = "[[-0.5,-0.5], [-0.5, 0.5], [0.5, 0.5], [0.5, -0.5]]"
+            inits[name].valType = 'code'
+        elif name == 'shape':
+            inits[name].val = 'triangle'
+            inits[name].valType = 'str'
+        elif name in ('movie', 'latitude', 'longitude', 'elevation', 'azimuth', 'speechPoint'):
+            inits[name].val = 'None'
+            inits[name].valType = 'code'
+        elif name == 'allowedKeys':
+            inits[name].val = "[]"
+            inits[name].valType = 'code'
         else:
-            print("I don't know the appropriate default value for a '%s' "
-                  "parameter. Please email the mailing list about this error" %
-                  name)
+            # if not explicitly handled, default to None
+            inits[name].val = "None"
+            inits[name].valType = "code"
 
     return inits
 
+
 tooltips = {}
 iconFiles = {}
+
+if __name__ == "__main__":
+    pass
+

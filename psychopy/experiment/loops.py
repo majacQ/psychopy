@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # Part of the PsychoPy library
-# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2021 Open Science Tools Ltd.
+# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2024 Open Science Tools Ltd.
 # Distributed under the terms of the GNU General Public License (GPL).
 
 """Experiment classes:
@@ -16,21 +16,57 @@ The code that writes out a *_lastrun.py experiment file is (in order):
     settings.SettingsComponent.writeEndCode()
 """
 
-from __future__ import absolute_import, print_function
-from builtins import object
+from copy import deepcopy
+from pathlib import Path
 from xml.etree.ElementTree import Element
 
-# from future import standard_library
-
 from psychopy.experiment import getInitVals
-from psychopy.localization import _localized, _translate
+from psychopy.localization import _translate
 from psychopy.experiment.params import Param
 from .components import getInitVals, getAllComponents
 
-# standard_library.install_aliases()
+
+class _BaseLoopHandler:
+
+    def writeInitCode(self, buff):
+        # no longer needed - initialise the trial handler just before it runs
+        pass
+
+    def writeInitCodeJS(self, buff):
+        pass
+
+    def writeLoopEndIterationCodeJS(self, buff):
+        """Ends this iteration of a loop (calling nextEntry if needed)"""
+        endLoopInteration = (f"\nfunction {self.name}LoopEndIteration(scheduler, snapshot) {{\n"
+                             "  // ------Prepare for next entry------\n"
+                             "  return async function () {\n")
+        # check if the loop has ended prematurely and stop() if needed
+        endLoopInteration += (
+                             "    if (typeof snapshot !== 'undefined') {\n"
+                             "      // ------Check if user ended loop early------\n"
+                             "      if (snapshot.finished) {\n"
+                             "        // Check for and save orphaned data\n"
+                             "        if (psychoJS.experiment.isEntryEmpty()) {\n"
+                             "          psychoJS.experiment.nextEntry(snapshot);\n"
+                             "        }\n"
+                             "        scheduler.stop();\n")
+        # if isTrials then always perform experiment.nextEntry
+        if self.params['isTrials']:
+            endLoopInteration += (
+                             "      } else {\n"
+                             "        psychoJS.experiment.nextEntry(snapshot);\n")
+        # then always close the loop and return NEXT to scheduler
+        endLoopInteration += (
+                             "      }\n"
+                             "    return Scheduler.Event.NEXT;\n"
+                             "    }\n"
+                             "  };\n"
+                             "}\n")
+
+        buff.writeIndentedLines(endLoopInteration)
 
 
-class TrialHandler(object):
+class TrialHandler(_BaseLoopHandler):
     """A looping experimental control object
             (e.g. generating a psychopy TrialHandler or StairHandler).
             """
@@ -58,34 +94,38 @@ class TrialHandler(object):
         self.params = {}
         self.params['name'] = Param(
             name, valType='code', inputType="single", updates=None, allowedUpdates=None,
-            label=_localized['Name'],
+            label=_translate('Name'),
             hint=_translate("Name of this loop"))
         self.params['nReps'] = Param(
             nReps, valType='num', inputType="spin", updates=None, allowedUpdates=None,
-            label=_localized['nReps'],
+            label=_translate('Num. repeats'),
             hint=_translate("Number of repeats (for each condition)"))
         self.params['conditions'] = Param(
             list(conditions), valType='str', inputType="single",
             updates=None, allowedUpdates=None,
-            label=_localized['conditions'],
+            label=_translate('Conditions'),
             hint=_translate("A list of dictionaries describing the "
                             "parameters in each condition"))
         self.params['conditionsFile'] = Param(
             conditionsFile, valType='file', inputType="table", updates=None, allowedUpdates=None,
-            label=_localized['conditions'],
+            label=_translate('Conditions'),
             hint=_translate("Name of a file specifying the parameters for "
                             "each condition (.csv, .xlsx, or .pkl). Browse "
                             "to select a file. Right-click to preview file "
-                            "contents, or create a new file."))
+                            "contents, or create a new file."),
+            ctrlParams={
+                'template': Path(__file__).parent / "loopTemplate.xltx"
+            }
+        )
         self.params['endPoints'] = Param(
             list(endPoints), valType='num', inputType="single", updates=None, allowedUpdates=None,
-            label=_localized['endPoints'],
+            label=_translate('End points'),
             hint=_translate("The start and end of the loop (see flow "
                             "timeline)"))
         self.params['Selected rows'] = Param(
             selectedRows, valType='str', inputType="single",
             updates=None, allowedUpdates=None,
-            label=_localized['Selected rows'],
+            label=_translate('Selected rows'),
             hint=_translate("Select just a subset of rows from your condition"
                             " file (the first is 0 not 1!). Examples: 0, "
                             "0:5, 5:-1"))
@@ -94,29 +134,22 @@ class TrialHandler(object):
             loopType, valType='str', inputType="choice",
             allowedVals=['random', 'sequential', 'fullRandom',
                          'staircase', 'interleaved staircases'],
-            label=_localized['loopType'],
+            label=_translate('Loop type'),
             hint=_translate("How should the next condition value(s) be "
                             "chosen?"))
         self.params['random seed'] = Param(
             randomSeed, valType='code', inputType="single", updates=None, allowedUpdates=None,
-            label=_localized['random seed'],
+            label=_translate('Random seed'),
             hint=_translate("To have a fixed random sequence provide an "
                             "integer of your choosing here. Leave blank to "
                             "have a new random sequence on each run of the "
                             "experiment."))
         self.params['isTrials'] = Param(
             isTrials, valType='bool', inputType="bool", updates=None, allowedUpdates=None,
-            label=_localized["Is trials"],
+            label=_translate("Is trials"),
             hint=_translate("Indicates that this loop generates TRIALS, "
                             "rather than BLOCKS of trials or stimuli within "
                             "a trial. It alters how data files are output"))
-
-    def writeInitCode(self, buff):
-        # no longer needed - initialise the trial handler just before it runs
-        pass
-
-    def writeInitCodeJS(self, buff):
-        pass
 
     def writeLoopStartCode(self, buff):
         """Write the code to create and run a sequence of trials
@@ -125,54 +158,92 @@ class TrialHandler(object):
         inits = getInitVals(self.params)
         # import conditions from file?
         if self.params['conditionsFile'].val in ['None', None, 'none', '']:
-            condsStr = "[None]"
+            inits['trialList'] = (
+                "[None]"
+            )
         elif self.params['Selected rows'].val in ['None', None, 'none', '']:
             # just a conditions file with no sub-selection
-            _con = "data.importConditions(%s)"
-            condsStr = _con % self.params['conditionsFile']
+            inits['trialList'] = (
+                "data.importConditions(%(conditionsFile)s)"
+            ) % inits
         else:
             # a subset of a conditions file
-            condsStr = ("data.importConditions(%(conditionsFile)s, selection="
-                        "%(Selected rows)s)") % self.params
+            inits['trialList'] = (
+                 "data.importConditions(\n"
+                 "    %(conditionsFile)s, \n"
+                 "    selection=%(Selected rows)s\n"
+                 ")\n"
+            ) % inits
         # also a 'thisName' for use in "for thisTrial in trials:"
         makeLoopIndex = self.exp.namespace.makeLoopIndex
-        self.thisName = makeLoopIndex(self.params['name'].val)
+        self.thisName = inits['loopIndex'] = makeLoopIndex(self.params['name'].val)
         # write the code
-        code = ("\n# set up handler to look after randomisation of conditions etc\n"
-                "%(name)s = data.TrialHandler(nReps=%(nReps)s, method=%(loopType)s, \n"
-                "    extraInfo=expInfo, originPath=-1,\n")
+        code = (
+            "\n"
+            "# set up handler to look after randomisation of conditions etc\n"
+            "%(name)s = data.TrialHandler2(\n"
+            "    name='%(name)s',\n"
+            "    nReps=%(nReps)s, \n"
+            "    method=%(loopType)s, \n"
+            "    extraInfo=expInfo, \n"
+            "    originPath=-1, \n"
+            "    trialList=%(trialList)s, \n"
+            "    seed=%(random seed)s, \n"
+            ")\n"
+        )
         buff.writeIndentedLines(code % inits)
-        # the next line needs to be kept separate to preserve potential string formatting
-        # by the user in condStr (i.e. it shouldn't be a formatted string itself
-        code = "    trialList=" + condsStr + ",\n"  # conditions go here
-        buff.writeIndented(code)
-        code = "    seed=%(random seed)s, name='%(name)s')\n"
+        code = (
+            "thisExp.addLoop(%(name)s)  # add the loop to the experiment\n" 
+            "%(loopIndex)s = %(name)s.trialList[0]  # so we can initialise stimuli with some values\n"
+        )
         buff.writeIndentedLines(code % inits)
-
-        code = ("thisExp.addLoop(%(name)s)  # add the loop to the experiment\n" +
-                self.thisName + " = %(name)s.trialList[0]  " +
-                "# so we can initialise stimuli with some values\n")
-        buff.writeIndentedLines(code % self.params)
         # unclutter the namespace
         if not self.exp.prefsBuilder['unclutteredNamespace']:
             code = ("# abbreviate parameter names if possible (e.g. rgb = %(name)s.rgb)\n"
                     "if %(name)s != None:\n"
                     "    for paramName in %(name)s:\n"
-                    "        exec('{} = %(name)s[paramName]'.format(paramName))\n")
+                    "        globals()[paramName] = %(name)s[paramName]\n")
             buff.writeIndentedLines(code % {'name': self.thisName})
+
+        # send data to Liaison before loop starts
+        if self.params['isTrials'].val:
+            buff.writeIndentedLines(
+                "if thisSession is not None:\n"
+                "    # if running in a Session with a Liaison client, send data up to now\n"
+                "    thisSession.sendExperimentData()\n"
+            )
 
         # then run the trials loop
         code = "\nfor %s in %s:\n"
         buff.writeIndentedLines(code % (self.thisName, self.params['name']))
-        # fetch parameter info from conditions
         buff.setIndentLevel(1, relative=True)
-        buff.writeIndented("currentLoop = %s\n" % self.params['name'])
+        # mark current trial as started
+        code = (
+            "%(name)s.status = STARTED\n"
+            "if hasattr(%(loopIndex)s, 'status'):\n"
+            "    %(loopIndex)s.status = STARTED\n"
+        )
+        buff.writeIndentedLines(code % inits)
+        # fetch parameter info from conditions
+        code = (
+            "currentLoop = %(name)s\n"
+            "thisExp.timestampOnFlip(win, 'thisRow.t', format=globalClock.format)\n"
+        )
+        buff.writeIndentedLines(code % self.params)
+
+        # send data to Liaison at start of each iteration
+        if self.params['isTrials'].val:
+            buff.writeIndentedLines(
+                "if thisSession is not None:\n"
+                "    # if running in a Session with a Liaison client, send data up to now\n"
+                "    thisSession.sendExperimentData()\n"
+            )
         # unclutter the namespace
         if not self.exp.prefsBuilder['unclutteredNamespace']:
             code = ("# abbreviate parameter names if possible (e.g. rgb = %(name)s.rgb)\n"
                     "if %(name)s != None:\n"
                     "    for paramName in %(name)s:\n"
-                    "        exec('{} = %(name)s[paramName]'.format(paramName))\n")
+                    "        globals()[paramName] = %(name)s[paramName]\n")
             buff.writeIndentedLines(code % {'name': self.thisName})
 
     def writeLoopStartCodeJS(self, buff, modular):
@@ -204,17 +275,27 @@ class TrialHandler(object):
         elif isinstance(nReps, str):
             nReps = nReps.strip("$")
 
-        code = ("\nfunction {loopName}LoopBegin({loopName}LoopScheduler) {{\n"
-                "  // set up handler to look after randomisation of conditions etc\n"
-                "  {loopName} = new TrialHandler({{\n"
-                "    psychoJS: psychoJS,\n"
-                "    nReps: {nReps}, method: TrialHandler.Method.{loopType},\n"
-                "    extraInfo: expInfo, originPath: undefined,\n"
-                "    trialList: {trialList},\n"
-                "    seed: {seed}, name: '{loopName}'\n"
-                "  }});\n"
-                "  psychoJS.experiment.addLoop({loopName}); // add the loop to the experiment\n"
-                "  currentLoop = {loopName};  // we're now the current loop\n"
+        code = ("\nfunction {loopName}LoopBegin({loopName}LoopScheduler, snapshot) {{\n"
+                "  return async function() {{\n"
+                .format(loopName=self.params['name'],
+                        loopType=(self.params['loopType'].val).upper(),
+                        nReps=nReps,
+                        trialList=trialList,
+                        seed=seed))
+        buff.writeIndentedLines(code)
+        buff.setIndentLevel(2, relative=True)
+
+        code = ("TrialHandler.fromSnapshot(snapshot); // update internal variables (.thisN etc) of the loop\n\n"
+                "// set up handler to look after randomisation of conditions etc\n"
+                "{loopName} = new TrialHandler({{\n"
+                "  psychoJS: psychoJS,\n"
+                "  nReps: {nReps}, method: TrialHandler.Method.{loopType},\n"
+                "  extraInfo: expInfo, originPath: undefined,\n"
+                "  trialList: {trialList},\n"
+                "  seed: {seed}, name: '{loopName}'\n"
+                "}});\n"
+                "psychoJS.experiment.addLoop({loopName}); // add the loop to the experiment\n"
+                "currentLoop = {loopName};  // we're now the current loop\n"
                 .format(loopName=self.params['name'],
                         loopType=(self.params['loopType'].val).upper(),
                         nReps=nReps,
@@ -224,15 +305,15 @@ class TrialHandler(object):
         
         # for the scheduler
         if modular:
-            code = ("\n  // Schedule all the trials in the trialList:\n"
-                    "  for (const {thisName} of {loopName}) {{\n"
-                    "    const snapshot = {loopName}.getSnapshot();\n"
-                    "    {loopName}LoopScheduler.add(importConditions(snapshot));\n")
+            code = ("\n// Schedule all the trials in the trialList:\n"
+                    "for (const {thisName} of {loopName}) {{\n"
+                    "  snapshot = {loopName}.getSnapshot();\n"
+                    "  {loopName}LoopScheduler.add(importConditions(snapshot));\n")
         else:
-            code = ("\n  // Schedule all the trials in the trialList:\n"
-                    "  {loopName}.forEach(function() {{\n"
-                    "    const snapshot = {loopName}.getSnapshot();\n\n"
-                    "    {loopName}LoopScheduler.add(importConditions(snapshot));\n")
+            code = ("\n// Schedule all the trials in the trialList:\n"
+                    "{loopName}.forEach(function() {{\n"
+                    "  snapshot = {loopName}.getSnapshot();\n\n"
+                    "  {loopName}LoopScheduler.add(importConditions(snapshot));\n")
         buff.writeIndentedLines(code.format(loopName=self.params['name'],
                                             thisName=self.thisName))
         # then we need to include begin, eachFrame and end code for each entry within that loop
@@ -240,42 +321,81 @@ class TrialHandler(object):
         thisLoop = loopDict[self]  # dict containing lists of children
         code = ""
         for thisChild in thisLoop:
-            if thisChild.getType() == 'Routine':
+            if isinstance(thisChild, (LoopInitiator, _BaseLoopHandler)):
+                # for a LoopInitiator
                 code += (
-                    "    {loopName}LoopScheduler.add({childName}RoutineBegin(snapshot));\n"
-                    "    {loopName}LoopScheduler.add({childName}RoutineEachFrame(snapshot));\n"
-                    "    {loopName}LoopScheduler.add({childName}RoutineEnd(snapshot));\n"
-                    .format(childName=thisChild.params['name'],
-                            loopName=self.params['name'])
-                    )
-            else:  # for a LoopInitiator
+                    "  const {childName}LoopScheduler = new Scheduler(psychoJS);\n"
+                    "  {loopName}LoopScheduler.add({childName}LoopBegin({childName}LoopScheduler, snapshot));\n"
+                    "  {loopName}LoopScheduler.add({childName}LoopScheduler);\n"
+                    "  {loopName}LoopScheduler.add({childName}LoopEnd);\n"
+                        .format(childName=thisChild.params['name'],
+                                loopName=self.params['name'])
+                )
+            else:
                 code += (
-                    "    const {childName}LoopScheduler = new Scheduler(psychoJS);\n"
-                    "    {loopName}LoopScheduler.add({childName}LoopBegin, {childName}LoopScheduler);\n"
-                    "    {loopName}LoopScheduler.add({childName}LoopScheduler);\n"
-                    "    {loopName}LoopScheduler.add({childName}LoopEnd);\n"
+                    "  {loopName}LoopScheduler.add({childName}RoutineBegin(snapshot));\n"
+                    "  {loopName}LoopScheduler.add({childName}RoutineEachFrame());\n"
+                    "  {loopName}LoopScheduler.add({childName}RoutineEnd(snapshot));\n"
                     .format(childName=thisChild.params['name'],
                             loopName=self.params['name'])
                     )
 
-        code += "    {loopName}LoopScheduler.add(endLoopIteration({loopName}LoopScheduler, snapshot));\n"
-        code += "  }}%s\n" % ([');', ''][modular])
+        code += "  {loopName}LoopScheduler.add({loopName}LoopEndIteration({loopName}LoopScheduler, snapshot));\n"
+        code += "}}%s\n" % ([');', ''][modular])
         code += ("\n"
-                 "  return Scheduler.Event.NEXT;\n"
-                 "}}\n")
+                 "return Scheduler.Event.NEXT;\n")
         buff.writeIndentedLines(code.format(loopName=self.params['name']))
+        buff.setIndentLevel(-2, relative=True)
+        buff.writeIndentedLines(
+                 "  }\n"
+                 "}\n"
+        )
 
     def writeLoopEndCode(self, buff):
-        # Just within the loop advance data line if loop is whole trials
+        # copy params so we can safely add to it
+        params = self.params.copy()
+        # add param for current trial name
+        params['thisName'] = self.thisName
+        # mark current trial as finished at end of each iteration
+        code = (
+            "# mark %(thisName)s as finished\n"
+            "if hasattr(%(thisName)s, 'status'):\n"
+            "    %(thisName)s.status = FINISHED\n"
+            "# if awaiting a pause, pause now\n"
+            "if %(name)s.status == PAUSED:\n"
+            "    thisExp.status = PAUSED\n"
+            "    pauseExperiment(\n"
+            "        thisExp=thisExp, \n"
+            "        win=win, \n"
+            "        timers=[globalClock], \n"
+            "    )\n"
+            "    # once done pausing, restore running status\n"
+            "    %(name)s.status = STARTED"
+        )
+        buff.writeIndentedLines(code % params)
+        # just within the loop advance data line if loop is whole trials
         if self.params['isTrials'].val == True:
-            buff.writeIndentedLines("thisExp.nextEntry()\n\n")
+            buff.writeIndentedLines(
+                "thisExp.nextEntry()\n"
+                "\n"
+            )
         # end of the loop. dedent
         buff.setIndentLevel(-1, relative=True)
-        buff.writeIndented("# completed %s repeats of '%s'\n"
-                           % (self.params['nReps'], self.params['name']))
-        buff.writeIndented("\n")
+        # mark finished
+        code = (
+            "# completed %(nReps)s repeats of '%(name)s'\n"
+            "%(name)s.status = FINISHED\n"
+            "\n"
+        )
+        buff.writeIndentedLines(code % params)
         # save data
-        if self.params['isTrials'].val == True:
+        if self.params['isTrials'].val:
+            # send final data to Liaison
+            buff.writeIndentedLines(
+                "if thisSession is not None:\n"
+                "    # if running in a Session with a Liaison client, send data up to now\n"
+                "    thisSession.sendExperimentData()\n"
+            )
             # a string to show all the available variables (if the conditions
             # isn't just None or [None])
             saveExcel = self.exp.settings.params['Save excel file'].val
@@ -297,26 +417,47 @@ class TrialHandler(object):
                         "    dataOut=['n','all_mean','all_std', 'all_raw'])\n")
                 buff.writeIndentedLines(code % self.params)
             if saveCSV:
-                code = ("%(name)s.saveAsText(filename + '%(name)s.csv', "
+                code = ("%(name)s.saveAsText(filename + '_%(name)s.csv', "
                         "delim=',',\n"
                         "    stimOut=params,\n"
                         "    dataOut=['n','all_mean','all_std', 'all_raw'])\n")
                 buff.writeIndentedLines(code % self.params)
 
     def writeLoopEndCodeJS(self, buff):
-        # Just within the loop advance data line if loop is whole trials
-        code = ("\nfunction {funName}LoopEnd() {{\n"
-                "  psychoJS.experiment.removeLoop({name});\n\n".format(funName=self.params['name'].val,
-                                                                       name=self.params['name']))
-        code += ("  return Scheduler.Event.NEXT;\n"
-                "}\n")
-        buff.writeIndentedLines(code)
+        code = (
+            "\n"
+            "async function %(name)sLoopEnd() {\n"
+        )
+        buff.writeIndentedLines(code % self.params)
+
+        buff.setIndentLevel(1, relative=True)
+        code = (
+                "// terminate loop\n"
+                "psychoJS.experiment.removeLoop(%(name)s);\n"
+                "// update the current loop from the ExperimentHandler\n"
+                "if (psychoJS.experiment._unfinishedLoops.length>0)\n"
+                "  currentLoop = psychoJS.experiment._unfinishedLoops.at(-1);\n"
+                "else\n"
+                "  currentLoop = psychoJS.experiment;  // so we use addData from the experiment\n"
+                "return Scheduler.Event.NEXT;\n"
+        )
+        buff.writeIndentedLines(code % self.params)
+
+        buff.setIndentLevel(-1, relative=True)
+        code = (
+            "}"
+        )
+        buff.writeIndentedLines(code % self.params)
 
     def getType(self):
         return 'TrialHandler'
 
+    @property
+    def name(self):
+        return self.params['name'].val
 
-class StairHandler(object):
+
+class StairHandler(_BaseLoopHandler):
     """A staircase experimental control object.
     """
 
@@ -339,47 +480,47 @@ class StairHandler(object):
         self.params['name'] = Param(
             name, valType='code',
             hint=_translate("Name of this loop"),
-            label=_localized['Name'])
+            label=_translate('Name'))
         self.params['nReps'] = Param(
             nReps, valType='num', inputType='spin',
-            label=_localized['nReps'],
+            label=_translate('nReps'),
             hint=_translate("(Minimum) number of trials in the staircase"))
         self.params['start value'] = Param(
             startVal, valType='num', inputType='single',
-            label=_localized['start value'],
+            label=_translate('Start value'),
             hint=_translate("The initial value of the parameter"))
         self.params['max value'] = Param(
             maxVal, valType='num', inputType='single',
-            label=_localized['max value'],
+            label=_translate('Max value'),
             hint=_translate("The maximum value the parameter can take"))
         self.params['min value'] = Param(
             minVal, valType='num', inputType='single',
-            label=_localized['min value'],
+            label=_translate('Min value'),
             hint=_translate("The minimum value the parameter can take"))
         self.params['step sizes'] = Param(
             stepSizes, valType='list', inputType='single',
-            label=_localized['step sizes'],
+            label=_translate('Step sizes'),
             hint=_translate("The size of the jump at each step (can change"
                             " on each 'reversal')"))
         self.params['step type'] = Param(
             stepType, valType='str', inputType='choice', allowedVals=['lin', 'log', 'db'],
-            label=_localized['step type'],
+            label=_translate('Step type'),
             hint=_translate("The units of the step size (e.g. 'linear' will"
                             " add/subtract that value each step, whereas "
                             "'log' will ad that many log units)"))
         self.params['N up'] = Param(
             nUp, valType='num', inputType='spin',
-            label=_localized['N up'],
+            label=_translate('N up'),
             hint=_translate("The number of 'incorrect' answers before the "
                             "value goes up"))
         self.params['N down'] = Param(
             nDown, valType='num', inputType='spin',
-            label=_localized['N down'],
+            label=_translate('N down'),
             hint=_translate("The number of 'correct' answers before the "
                             "value goes down"))
         self.params['N reversals'] = Param(
             nReversals, valType='num', inputType='spin',
-            label=_localized['N reversals'],
+            label=_translate('N reversals'),
             hint=_translate("Minimum number of times the staircase must "
                             "change direction before ending"))
         # these two are really just for making the dialog easier (they won't
@@ -388,20 +529,24 @@ class StairHandler(object):
             'staircase', valType='str', inputType='choice',
             allowedVals=['random', 'sequential', 'fullRandom', 'staircase',
                          'interleaved staircases'],
-            label=_localized['loopType'],
+            label=_translate('Loop type'),
             hint=_translate("How should the next trial value(s) be chosen?"))
         # NB this is added for the sake of the loop properties dialog
         self.params['endPoints'] = Param(
             list(endPoints), valType='num', inputType='spin',
-            label=_localized['endPoints'],
+            label=_translate('End points'),
             hint=_translate('Where to loop from and to (see values currently'
                             ' shown in the flow view)'))
         self.params['isTrials'] = Param(
             isTrials, valType='bool', inputType='bool', updates=None, allowedUpdates=None,
-            label=_localized["Is trials"],
+            label=_translate("Is trials"),
             hint=_translate("Indicates that this loop generates TRIALS, "
                             "rather than BLOCKS of trials or stimuli within"
                             " a trial. It alters how data files are output"))
+
+    @property
+    def name(self):
+        return self.params['name'].val
 
     def writeInitCode(self, buff):
         # not needed - initialise the staircase only when needed
@@ -432,13 +577,23 @@ class StairHandler(object):
         code = "\nfor %s in %s:\n"
         buff.writeIndentedLines(code % (self.thisName, self.params['name']))
         buff.setIndentLevel(1, relative=True)
-        buff.writeIndented("currentLoop = %s\n" % self.params['name'])
+        code = (
+            "currentLoop = %(name)s\n"
+            "thisExp.timestampOnFlip(win, 'thisRow.t', format=globalClock.format)\n"
+        )
+        buff.writeIndentedLines(code % self.params)
         buff.writeIndented("level = %s\n" % self.thisName)
 
     def writeLoopEndCode(self, buff):
         # Just within the loop advance data line if loop is whole trials
         if self.params['isTrials'].val:
-            buff.writeIndentedLines("thisExp.nextEntry()\n\n")
+            buff.writeIndentedLines(
+                "thisExp.nextEntry()\n"
+                "\n"
+                "if thisSession is not None:\n"
+                "    # if running in a Session with a Liaison client, send data up to now\n"
+                "    thisSession.sendExperimentData()\n"
+            )
         # end of the loop. dedent
         buff.setIndentLevel(-1, relative=True)
         buff.writeIndented("# staircase completed\n")
@@ -451,14 +606,14 @@ class StairHandler(object):
                 buff.writeIndented(code % self.params)
             if self.exp.settings.params['Save csv file'].val:
                 code = ("%(name)s.saveAsText(filename + "
-                        "'%(name)s.csv', delim=',')\n")
+                        "'_%(name)s.csv', delim=',')\n")
                 buff.writeIndented(code % self.params)
 
     def getType(self):
         return 'StairHandler'
 
 
-class MultiStairHandler(object):
+class MultiStairHandler(_BaseLoopHandler):
     """To handle multiple interleaved staircases
     """
 
@@ -479,21 +634,21 @@ class MultiStairHandler(object):
         self.params = {}
         self.params['name'] = Param(
             name, valType='code', inputType='single',
-            label=_localized['Name'],
+            label=_translate('Name'),
             hint=_translate("Name of this loop"))
         self.params['nReps'] = Param(
             nReps, valType='num', inputType='spin',
-            label=_localized['nReps'],
+            label=_translate('nReps'),
             hint=_translate("(Minimum) number of trials in *each* staircase"))
         self.params['stairType'] = Param(
             stairType, valType='str', inputType='choice',
-            allowedVals=['simple', 'QUEST', 'quest', 'questplus'],
-            label=_localized['stairType'],
+            allowedVals=['simple', 'QUEST', 'questplus'],
+            label=_translate('Stair type'),
             hint=_translate("How to select the next staircase to run"))
         self.params['switchMethod'] = Param(
             switchStairs, valType='str', inputType='choice',
             allowedVals=['random', 'sequential', 'fullRandom'],
-            label=_localized['switchMethod'],
+            label=_translate('Switch method'),
             hint=_translate("How to select the next staircase to run"))
         # these two are really just for making the dialog easier (they won't
         # be used to generate code)
@@ -501,31 +656,61 @@ class MultiStairHandler(object):
             'staircase', valType='str', inputType='choice',
             allowedVals=['random', 'sequential', 'fullRandom', 'staircase',
                          'interleaved staircases'],
-            label=_localized['loopType'],
+            label=_translate('Loop type'),
             hint=_translate("How should the next trial value(s) be chosen?"))
         self.params['endPoints'] = Param(
             list(endPoints), valType='num', inputType='spin',
-            label=_localized['endPoints'],
+            label=_translate('End points'),
             hint=_translate('Where to loop from and to (see values currently'
                             ' shown in the flow view)'))
         self.params['conditions'] = Param(
             list(conditions), valType='list', inputType='single',
             updates=None, allowedUpdates=None,
-            label=_localized['conditions'],
+            label=_translate('Conditions'),
             hint=_translate("A list of dictionaries describing the "
                             "differences between each staircase"))
+
+        def getTemplate():
+            """
+            Method to get the template for this loop's chosen stair type. This is specified as a
+            method rather than a simple value as the control needs to update its target according
+            to the current value of stairType.
+
+            Returns
+            -------
+            pathlib.Path
+                Path to the appropriate template file
+            """
+            # root folder
+            root = Path(__file__).parent
+            # get file path according to stairType param
+            if self.params['stairType'] == "QUEST":
+                return root / "questTemplate.xltx"
+            elif self.params['stairType'] == "questplus":
+                return root / "questPlusTemplate.xltx"
+            else:
+                return root / "staircaseTemplate.xltx"
+
         self.params['conditionsFile'] = Param(
             conditionsFile, valType='file', inputType='table', updates=None, allowedUpdates=None,
-            label=_localized['conditions'],
+            label=_translate('Conditions'),
             hint=_translate("An xlsx or csv file specifying the parameters "
-                            "for each condition"))
+                            "for each condition"),
+            ctrlParams={
+                'template': getTemplate
+            }
+        )
         self.params['isTrials'] = Param(
             isTrials, valType='bool', inputType='bool', updates=None, allowedUpdates=None,
-            label=_localized["Is trials"],
+            label=_translate("Is trials"),
             hint=_translate("Indicates that this loop generates TRIALS, "
                             "rather than BLOCKS of trials or stimuli within "
                             "a trial. It alters how data files are output"))
         pass  # don't initialise at start of exp, create when needed
+
+    @property
+    def name(self):
+        return self.params['name'].val
 
     def writeLoopStartCode(self, buff):
         # create a 'thisName' for use in "for thisTrial in trials:"
@@ -549,19 +734,127 @@ class MultiStairHandler(object):
         buff.writeIndentedLines(code % self.params)
 
         buff.setIndentLevel(1, relative=True)
-        buff.writeIndented("currentLoop = %(name)s\n" % (self.params))
+        code = (
+            "currentLoop = %(name)s\n"
+            "thisExp.timestampOnFlip(win, 'thisRow.t', format=globalClock.format)\n"
+        )
+        buff.writeIndentedLines(code % self.params)
         # uncluttered namespace
         if not self.exp.prefsBuilder['unclutteredNamespace']:
             code = ("# abbreviate parameter names if possible (e.g. "
                     "rgb=condition.rgb)\n"
                     "for paramName in condition:\n"
-                    "    exec(paramName + '= condition[paramName]')\n")
+                    "    globals()[paramName] = condition[paramName]\n")
             buff.writeIndentedLines(code)
+
+    def writeLoopStartCodeJS(self, buff, modular):
+        inits = deepcopy(self.params)
+        # For JS, stairType needs to be code
+        inits['stairType'].valType = "code"
+        # Method needs to be code and upper
+        inits['switchMethod'].valType = "code"
+        inits['switchMethod'].val = inits['switchMethod'].val.upper()
+
+        code = (
+            "\nfunction %(name)sLoopBegin(%(name)sLoopScheduler, snapshot) {\n"
+        )
+        buff.writeIndentedLines(code % inits)
+
+        buff.setIndentLevel(1, relative=True)
+        code = (
+                "return async function() {\n"
+        )
+        buff.writeIndentedLines(code % inits)
+
+        buff.setIndentLevel(1, relative=True)
+        code = (
+                    "// setup a MultiStairTrialHandler\n"
+                    "%(name)sConditions = TrialHandler.importConditions(psychoJS.serverManager, %(conditionsFile)s);\n"
+                    "%(name)s = new data.MultiStairHandler({stairType:MultiStairHandler.StaircaseType.%(stairType)s, \n"
+        )
+        buff.writeIndentedLines(code % inits)
+
+        buff.setIndentLevel(1, relative=True)
+        code = (
+                        "psychoJS: psychoJS,\n"
+                        "name: '%(name)s',\n"
+                        "varName: 'intensity',\n"
+                        "nTrials: %(nReps)s,\n"
+                        "conditions: %(name)sConditions,\n"
+                        "method: TrialHandler.Method.%(switchMethod)s\n"
+        )
+        buff.writeIndentedLines(code % inits)
+
+        buff.setIndentLevel(-1, relative=True)
+        code = (
+                    "});\n"
+                    "psychoJS.experiment.addLoop(%(name)s); // add the loop to the experiment\n"
+                    "currentLoop = %(name)s;  // we're now the current loop\n"
+                    "// Schedule all the trials in the trialList:\n"
+                    "for (const thisQuestLoop of %(name)s) {\n"
+        )
+        buff.writeIndentedLines(code % inits)
+
+        buff.setIndentLevel(1, relative=True)
+        thisLoop = self.exp.flow.loopDict[self]
+        buff.writeIndentedLines(
+                        "%(name)sLoopScheduler.add(%(name)sLoopBeginIteration(snapshot));\n" % inits)
+        for thisChild in thisLoop:
+            if thisChild.getType() == 'Routine':
+                code = (
+                        "snapshot = %(name)s.getSnapshot();\n"
+                        "{loopName}LoopScheduler.add(importConditions(snapshot));\n"
+                        "{loopName}LoopScheduler.add({childName}RoutineBegin(snapshot));\n"
+                        "{loopName}LoopScheduler.add({childName}RoutineEachFrame());\n"
+                        "{loopName}LoopScheduler.add({childName}RoutineEnd());\n"
+                        .format(childName=thisChild.params['name'],
+                                loopName=self.params['name'])
+                    )
+            else:  # for a LoopInitiator
+                code = (
+                        "snapshot = %(name)s.getSnapshot();\n"
+                        "const {childName}LoopScheduler = new Scheduler(psychoJS);\n"
+                        "{loopName}LoopScheduler.add(importConditions(snapshot));\n"
+                        "{loopName}LoopScheduler.add({childName}LoopBegin({childName}LoopScheduler, snapshot));\n"
+                        "{loopName}LoopScheduler.add({childName}LoopScheduler);\n"
+                        "{loopName}LoopScheduler.add({childName}LoopEnd);\n"
+                        .format(childName=thisChild.params['name'],
+                                loopName=self.params['name'])
+                        )
+            buff.writeIndentedLines(code % inits)
+
+        buff.setIndentLevel(-1, relative=True)
+
+        code = ("// then iterate over this loop (%(name)s)\n"
+                "%(name)sLoopScheduler.add(%(name)sLoopEndIteration(%(name)sLoopScheduler, snapshot));\n"
+                "}"
+                "\n\n"
+                "return Scheduler.Event.NEXT;\n"
+                )
+        buff.writeIndentedLines(code % inits)
+
+        buff.setIndentLevel(-1, relative=True)
+        code = (
+                "}"
+        )
+        buff.writeIndentedLines(code % inits)
+
+        buff.setIndentLevel(-1, relative=True)
+        code = (
+            "}"
+        )
+        buff.writeIndentedLines(code % inits)
 
     def writeLoopEndCode(self, buff):
         # Just within the loop advance data line if loop is whole trials
         if self.params['isTrials'].val:
-            buff.writeIndentedLines("thisExp.nextEntry()\n\n")
+            buff.writeIndentedLines(
+                "thisExp.nextEntry()\n"
+                "\n"
+                "if thisSession is not None:\n"
+                "    # if running in a Session with a Liaison client, send data up to now\n"
+                "    thisSession.sendExperimentData()\n"
+            )
         # end of the loop. dedent
         buff.setIndentLevel(-1, relative=True)
         buff.writeIndented("# all staircases completed\n")
@@ -572,9 +865,45 @@ class MultiStairHandler(object):
                 code = "%(name)s.saveAsExcel(filename + '.xlsx')\n"
                 buff.writeIndented(code % self.params)
             if self.exp.settings.params['Save csv file'].val:
-                code = ("%(name)s.saveAsText(filename + '%(name)s.csv', "
+                code = ("%(name)s.saveAsText(filename + '_%(name)s.csv', "
                         "delim=',')\n")
                 buff.writeIndented(code % self.params)
+
+    def writeLoopBeginIterationCodeJS(self, buff):
+        startLoopInteration = (f"\nfunction {self.name}LoopBeginIteration(snapshot) {{\n"
+                               f"  return async function() {{\n"
+                               f"    // ------Prepare for next entry------\n"
+                               f"    level = {self.name}.intensity;\n\n"
+                               f"    return Scheduler.Event.NEXT;\n"
+                               f"  }}\n"
+                               f"}}\n")
+        buff.writeIndentedLines(startLoopInteration % self.params)
+
+    def writeLoopEndCodeJS(self, buff):
+        code = (
+            "\n"
+            "async function %(name)sLoopEnd() {\n"
+        )
+        buff.writeIndentedLines(code % self.params)
+
+        buff.setIndentLevel(1, relative=True)
+        code = (
+                "// terminate loop\n"
+                "psychoJS.experiment.removeLoop(%(name)s);\n"
+                "// update the current loop from the ExperimentHandler\n"
+                "if (psychoJS.experiment._unfinishedLoops.length>0)\n"
+                "  currentLoop = psychoJS.experiment._unfinishedLoops.at(-1);\n"
+                "else\n"
+                "  currentLoop = psychoJS.experiment;  // so we use addData from the experiment\n"\
+                "return Scheduler.Event.NEXT;\n"
+        )
+        buff.writeIndentedLines(code % self.params)
+
+        buff.setIndentLevel(-1, relative=True)
+        code = (
+            "}"
+        )
+        buff.writeIndentedLines(code % self.params)
 
     def getType(self):
         return 'MultiStairHandler'
@@ -584,7 +913,7 @@ class MultiStairHandler(object):
         pass
 
 
-class LoopInitiator(object):
+class LoopInitiator:
     """A simple class for inserting into the flow.
     This is created automatically when the loop is created"""
 
@@ -594,8 +923,17 @@ class LoopInitiator(object):
         self.exp = loop.exp
         loop.initiator = self
 
+    def __eq__(self, obj):
+        if isinstance(obj, str):
+            return self.loop.name == obj
+        elif isinstance(obj, LoopInitiator):
+            return self.loop.name == obj.loop.name
+
+    def __ne__(self, obj):
+        return not (self == obj)
+
     @property
-    def xml(self):
+    def _xml(self):
         # Make root element
         element = Element("LoopInitiator")
         element.set("loopType", self.loop.__class__.__name__)
@@ -615,14 +953,24 @@ class LoopInitiator(object):
             element.append(paramNode)
         return element
 
+    @property
+    def name(self):
+        return self.loop.name
+
     def getType(self):
         return 'LoopInitiator'
+
+    def writePreCodeJS(self, buff):
+        if hasattr(self.loop, 'writePreCodeJS'):
+            self.loop.writePreCodeJS(buff)
 
     def writeInitCode(self, buff):
         self.loop.writeInitCode(buff)
 
     def writeInitCodeJS(self, buff):
-        self.loop.writeInitCodeJS(buff)
+        if hasattr(self.loop, "writeInitCodeJS"):
+            # the loop may not have/need this option
+            self.loop.writeInitCodeJS(buff)
 
     def writeMainCode(self, buff):
         self.loop.writeLoopStartCode(buff)
@@ -631,6 +979,9 @@ class LoopInitiator(object):
 
     def writeMainCodeJS(self, buff, modular):
         self.loop.writeLoopStartCodeJS(buff, modular)
+        # some loops do extra things in their beginIteration
+        if hasattr(self.loop, 'writeLoopBeginIterationCodeJS'):
+            self.loop.writeLoopBeginIterationCodeJS(buff)
         # we are now the inner-most loop
         self.exp.flow._loopList.append(self.loop)
 
@@ -638,7 +989,7 @@ class LoopInitiator(object):
         pass
 
 
-class LoopTerminator(object):
+class LoopTerminator:
     """A simple class for inserting into the flow.
     This is created automatically when the loop is created"""
 
@@ -649,12 +1000,16 @@ class LoopTerminator(object):
         loop.terminator = self
 
     @property
-    def xml(self):
+    def _xml(self):
         # Make root element
         element = Element("LoopTerminator")
         element.set("name", self.loop.params['name'].val)
 
         return element
+
+    @property
+    def name(self):
+        return self.loop.name
 
     def getType(self):
         return 'LoopTerminator'
@@ -669,6 +1024,7 @@ class LoopTerminator(object):
 
     def writeMainCodeJS(self, buff, modular):
         self.loop.writeLoopEndCodeJS(buff)
+        self.loop.writeLoopEndIterationCodeJS(buff)
         # _loopList[-1] will now be the inner-most loop
         self.exp.flow._loopList.remove(self.loop)
 

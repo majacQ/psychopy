@@ -25,7 +25,7 @@ Commonly used:
 
 * :class:`.ImageStim` to show images
 * :class:`.TextStim` to show text
-* :class:`.TextBox` rewrite of TextStim (faster/better but only monospace fonts)
+* :class:`.TextBox2` rewrite of TextStim (faster, editable with more layout options and formatting)
 
 Shapes (all special classes of :class:`ShapeStim`):
 
@@ -38,7 +38,6 @@ Shapes (all special classes of :class:`ShapeStim`):
 
 Images and patterns:
 
-* :class:`.ImageStim` to show images
 * :class:`.SimpleImageStim` to show images without bells and whistles
 * :class:`.GratingStim` to show gratings
 * :class:`.RadialStim` to show annulus, a rotating wedge, a checkerboard etc
@@ -55,8 +54,6 @@ Multiple stimuli:
 * :class:`.LightSource` to define a light source in a scene
 * :class:`.SceneSkybox` to render a background skybox for VR and 3D scenes
 * :class:`.BlinnPhongMaterial` to specify a material using the Blinn-Phong lighting model
-* :class:`.RigidBodyPose` to define poses of objects in 3D space
-* :class:`.BoundingBox` to define bounding boxes around 3D objects
 * :class:`.SphereStim` to show a 3D sphere
 * :class:`.BoxStim` to show 3D boxes and cubes
 * :class:`.PlaneStim` to show 3D plane
@@ -65,6 +62,7 @@ Multiple stimuli:
 Other stimuli:
 
 * :class:`.MovieStim` to show movies
+* :class:`.VlcMovieStim` to show movies using VLC
 * :class:`.Slider` a new improved class to collect ratings
 * :class:`.RatingScale` to collect ratings
 * :class:`.CustomMouse` to change the cursor in windows with GUI. OBS: will be deprecated soon

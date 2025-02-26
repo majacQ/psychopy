@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # Part of the PsychoPy library
-# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2021 Open Science Tools Ltd.
+# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2024 Open Science Tools Ltd.
 # Distributed under the terms of the GNU General Public License (GPL).
 
 
@@ -13,11 +13,12 @@ consoles/terminals within the PsychoPy GUI suite.
 # This module can be expanded to centralize management for all console related
 # actions in the future.
 #
-
+import os.path
 import sys
+import io
 
 
-class StdStreamDispatcher(object):
+class StdStreamDispatcher:
     """Class for broadcasting standard output to text boxes.
 
     This class serves to redirect and log standard streams within the PsychoPy
@@ -40,17 +41,14 @@ class StdStreamDispatcher(object):
     _instance = None
     _initialized = False
     _app = None  # reference to parent app
+    _logFile = None
 
-    def __init__(self, app):
+    def __init__(self, app, logFile=None):
         # only setup if previously not instanced
         if not self._initialized:
             self._app = app
-        else:
-            raise RuntimeError(
-                "Cannot create a new `psychopy.app.console.StdOutManager` "
-                "instance. Already initialized.")
-
-        self._initialized = True
+            self._logFile = logFile
+            self._initialized = True
 
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
@@ -86,6 +84,21 @@ class StdStreamDispatcher(object):
         """
         return cls._initialized
 
+    @property
+    def logFile(self):
+        """Log file for standard streams (`str` or `None`).
+        """
+        return self._logFile
+
+    @logFile.setter
+    def logFile(self, val):
+        self._logFile = val
+
+    def redirect(self):
+        """Redirect `stdout` and `stderr` to listeners.
+        """
+        sys.stdout = sys.stderr = self
+
     def write(self, text):
         """Send text standard output to all listeners (legacy). This method is
         used for compatibility for older code. This makes it so an instance of
@@ -120,6 +133,13 @@ class StdStreamDispatcher(object):
         runner = self._app.runner
         if runner is not None:
             runner.stdOut.write(text)
+
+        # write to log file
+        if self._logFile is not None:
+            # with open(self._logFile, 'a') as lf:
+            with io.open(self._logFile, 'a', encoding="utf-8") as lf:
+                lf.write(text)
+                lf.flush()
 
     def flush(self):
         pass

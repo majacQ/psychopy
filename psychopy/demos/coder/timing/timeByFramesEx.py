@@ -8,11 +8,6 @@ and disable python garbage collection to see if either influences
 the precision of your frame flips.
 """
 
-from __future__ import division
-from __future__ import print_function
-
-from builtins import str
-from builtins import range
 import gc, numpy
 from psychopy import visual, logging, core, event
 
@@ -36,7 +31,7 @@ if disable_gc:
     gc.disable()
 
 import matplotlib
-matplotlib.use('Qt4Agg')  # change this to control the plotting 'back end'
+matplotlib.use('QtAgg')  # change this to control the plotting 'back end'
 import pylab
 
 win = visual.Window([1280, 1024], fullscr=True, allowGUI=False, waitBlanking=True)

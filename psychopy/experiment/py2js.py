@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # Part of the PsychoPy library
-# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2021 Open Science Tools Ltd.
+# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2024 Open Science Tools Ltd.
 # Distributed under the terms of the GNU General Public License (GPL).
 
 """Converting code parameters and components from python (PsychoPy)
@@ -10,40 +10,15 @@ to JS (ES6/PsychoJS)
 """
 
 import ast
+from pathlib import Path
+
 import astunparse
 import esprima
 from os import path
-from psychopy.constants import PY3
 from psychopy import logging
 
-if PY3:
-    from past.builtins import unicode
-    from io import StringIO
-else:
-    from StringIO import StringIO
+from io import StringIO
 from psychopy.experiment.py2js_transpiler import translatePythonToJavaScript
-
-
-class NamesJS(dict):
-    def __getitem__(self, name):
-        try:
-            return dict.__getitem__(self, name)
-        except:
-            return "{}".format(name)
-
-
-namesJS = NamesJS()
-namesJS['sin'] = 'Math.sin'
-namesJS['cos'] = 'Math.cos'
-namesJS['tan'] = 'Math.tan'
-namesJS['pi'] = 'Math.PI'
-namesJS['rand'] = 'Math.random'
-namesJS['random'] = 'Math.random'
-namesJS['sqrt'] = 'Math.sqrt'
-namesJS['abs'] = 'Math.abs'
-namesJS['randint'] = 'util.randint'
-namesJS['round'] = 'util.round'  # better than Math.round, supports n DPs arg
-namesJS['sum'] = 'util.sum'
 
 
 class TupleTransformer(ast.NodeTransformer):
@@ -56,6 +31,7 @@ class TupleTransformer(ast.NodeTransformer):
     """
     def visit_Tuple(self, node):
         return ast.List(node.elts, node.ctx)
+
 
 class Unparser(astunparse.Unparser):
     """astunparser had buried the future_imports option underneath its init()
@@ -89,23 +65,21 @@ def expression2js(expr):
         syntaxTree = ast.parse(expr)
     except Exception:
         try:
-            syntaxTree = ast.parse(unicode(expr))
+            syntaxTree = ast.parse(str(expr))
         except Exception as err:
             logging.error(err)
-            return
-
+            return str(expr)
 
     for node in ast.walk(syntaxTree):
         TupleTransformer().visit(node)  # Transform tuples to list
         # for py2 using 'unicode_literals' we don't want
         if isinstance(node, ast.Str) and type(node.s)==bytes:
-            node.s = unicode(node.s, 'utf-8')
+            node.s = str(node.s, 'utf-8')
         elif isinstance(node, ast.Str) and node.s.startswith("u'"):
             node.s = node.s[1:]
         if isinstance(node, ast.Name):
             if node.id == 'undefined':
                 continue
-            node.id = namesJS[node.id]
     jsStr = unparse(syntaxTree).strip()
     if not any(ch in jsStr for ch in ("=",";","\n")):
         try:
@@ -116,6 +90,7 @@ def expression2js(expr):
             # If translation fails, just use old translation
             pass
     return jsStr
+
 
 def snippet2js(expr):
     """Convert several lines (e.g. a Code Component) Python to JS"""
@@ -161,10 +136,15 @@ def addVariableDeclarations(inputProgram, fileName):
 
     # parse Javascript code into abstract syntax tree:
     # NB: esprima: https://media.readthedocs.org/pdf/esprima/4.0/esprima.pdf
+    fileName = Path(str(fileName))
     try:
         ast = esprima.parseScript(inputProgram, {'range': True, 'tolerant': True})
     except esprima.error_handler.Error as err:
-        logging.error("{0} in {1}".format(err, path.split(fileName)[1]))
+        if fileName:
+            logging.error(f"Error parsing JS in {fileName.name}:\n{err}")
+        else:
+            logging.error(f"Error parsing JS: {err}")
+        logging.flush()
         return inputProgram  # So JS can be written to file
 
     # find undeclared vars in functions and declare them before the function

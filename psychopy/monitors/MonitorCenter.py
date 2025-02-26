@@ -2,13 +2,8 @@
 # -*- coding: utf-8 -*-
 
 # Part of the PsychoPy library
-# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2021 Open Science Tools Ltd.
+# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2024 Open Science Tools Ltd.
 # Distributed under the terms of the GNU General Public License (GPL).
-
-from __future__ import absolute_import, print_function
-from past.builtins import xrange, unicode
-from builtins import map
-from builtins import range
 
 import time
 import os
@@ -18,7 +13,6 @@ import wx
 from wx import grid
 from wx.lib import intctrl
 
-from psychopy import constants
 from psychopy.localization import _translate
 from psychopy import monitors, hardware, logging
 from psychopy.app import dialogs
@@ -48,7 +42,7 @@ if not hasattr(wx.grid, 'EVT_GRID_CELL_CHANGED'):
 
 # wx IDs for menu items
 def newIds(n):
-    return [wx.NewId() for i in range(n)]
+    return [wx.NewIdRef(count=1) for i in range(n)]
 
 [idMenuSave] = newIds(1)
 # wx IDs for controllers (admin panel)
@@ -65,8 +59,6 @@ def unicodeToFloat(val):
     if val == 'None':
         val = None
     else:
-        if not constants.PY3 and type(val) == unicode:
-            val = val.encode('utf-8')
         try:
             val = locale.atof(val)
         except ValueError:
@@ -236,7 +228,7 @@ class MainFrame(wx.Frame):
 
         # Edit
         editMenu = wx.Menu()
-        id = wx.NewId()
+        id = wx.NewIdRef(count=1)
         _hint = _translate("Copy the current monitor's name to clipboard")
         editMenu.Append(id, _translate('Copy\tCtrl+C'), _hint)
         self.Bind(wx.EVT_MENU, self.onCopyMon, id=id)
@@ -384,9 +376,9 @@ class MainFrame(wx.Frame):
         self.comPortLabel = wx.StaticText(parent, -1, " ", size=(150, 20))
         # photometer button
         # photom type choices should not need localization:
-        _choices = list([p.longName for p in hardware.getAllPhotometers()])
+        self._photomTypeItems = list([p.longName for p in hardware.getAllPhotometers()] + ["Get more..."])
         self.ctrlPhotomType = wx.Choice(parent, -1, name="Type:",
-                                        choices=_choices)
+                                        choices=self._photomTypeItems)
 
         _ports = list(hardware.getSerialPorts())
         self._photomChoices = [_translate("Scan all ports")] + _ports
@@ -396,7 +388,7 @@ class MainFrame(wx.Frame):
                                           choices=self._photomChoices,
                                           size=_size)
 
-        # self.Bind(wx.EVT_CHOICE, self.onChangePhotomType, self.ctrlPhotomType)
+        self.ctrlPhotomType.Bind(wx.EVT_CHOICE, self.onChangePhotomType)
         self.btnFindPhotometer = wx.Button(parent, -1,
                                            _translate("Get Photometer"))
         self.Bind(wx.EVT_BUTTON,
@@ -953,10 +945,22 @@ class MainFrame(wx.Frame):
     def onCtrlPhotomType(self, event):
         pass
 
+    def onChangePhotomType(self, evt=None):
+        if evt.GetSelection() == len(self._photomTypeItems) - 1:
+            # if they chose "Get more...", clear selection and open plugin dlg
+            self.ctrlPhotomType.SetSelection(-1)
+            from ..app.plugin_manager.dialog import EnvironmentManagerDlg
+            dlg = EnvironmentManagerDlg(self)
+            dlg.pluginMgr.pluginList.searchCtrl.SetValue("photometer")
+            dlg.pluginMgr.pluginList.search()
+            dlg.Show()
+        else:
+            evt.Skip()
+
     def onBtnFindPhotometer(self, event):
 
         # safer to get by index, but GetStringSelection will work for
-        # nonlocalized techincal names:
+        # nonlocalized technical names:
         photName = self.ctrlPhotomType.GetStringSelection()
         # not sure how
         photPort = self.ctrlPhotomPort.GetValue().strip()
@@ -1064,7 +1068,7 @@ class MainFrame(wx.Frame):
 
             lumsPost = self.currentMon.getLumsPost()
             levelsPost = self.currentMon.getLevelsPost()
-        if lumsPost != None:
+        if lumsPost is not None:
             for gun in range(4):  # includes lum,r,g,b
                 lums = lumsPost[gun, :]
                 gamma = gammaGrid[gun, 2]
@@ -1118,8 +1122,9 @@ class GammaLumValsDlg(wx.Dialog):
         btnOK.SetDefault()
         btnCANC = wx.Button(panel, wx.ID_CANCEL, _translate(" Cancel "))
 
-        butBox.Add(btnOK, 1, wx.BOTTOM | wx.ALIGN_RIGHT, pad)
-        butBox.Add(btnCANC, 1, wx.BOTTOM | wx.RIGHT | wx.ALIGN_RIGHT, pad)
+        butBox.AddStretchSpacer(1)
+        butBox.Add(btnOK, 1, wx.BOTTOM, pad)
+        butBox.Add(btnCANC, 1, wx.BOTTOM | wx.RIGHT, pad)
         mainSizer.Add(butBox, flag=wx.ALIGN_CENTER | wx.TOP | wx.BOTTOM,
                       border=10)
 

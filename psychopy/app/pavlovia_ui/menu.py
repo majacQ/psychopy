@@ -2,20 +2,23 @@
 # -*- coding: utf-8 -*-
 
 # Part of the PsychoPy library
-# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2021 Open Science Tools Ltd.
+# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2024 Open Science Tools Ltd.
 # Distributed under the terms of the GNU General Public License (GPL).
+import io
 
 import wx
 import requests
 
 from psychopy import logging
 from .. import dialogs
+from ..themes import icons
 from .functions import logInPavlovia
 from psychopy.app.pavlovia_ui.project import syncProject
 from .search import SearchFrame
 from .project import ProjectEditor
 from psychopy.localization import _translate
 from psychopy.projects import pavlovia
+from psychopy.app.pavlovia_ui import sync
 
 
 class PavloviaMenu(wx.Menu):
@@ -35,6 +38,7 @@ class PavloviaMenu(wx.Menu):
 
         # item = self.Append(wx.ID_ANY, _translate("Tell me more..."))
         # parent.Bind(wx.EVT_MENU, self.onAbout, id=item.GetId())
+        # parent.Bind(wx.EVT_MENU, self.onAbout, id=item.GetId())
 
         PavloviaMenu.knownUsers = pavlovia.knownUsers
 
@@ -46,8 +50,10 @@ class PavloviaMenu(wx.Menu):
             lastPavUser = None
         # if lastPavUser and not PavloviaMenu.currentUser:
         #     self.setUser(PavloviaMenu.appData['pavloviaUser'])
-        for name in self.knownUsers:
-            self.addToSubMenu(name, self.userMenu, self.onSetUser)
+        if self.knownUsers is not None:
+            for name in self.knownUsers:
+                self.addToSubMenu(name, self.userMenu, self.onSetUser)
+
         self.userMenu.AppendSeparator()
         self.loginBtn = self.userMenu.Append(wx.ID_ANY,
                                     _translate("Log in to Pavlovia...\t{}")
@@ -94,7 +100,7 @@ class PavloviaMenu(wx.Menu):
         if user in pavlovia.knownUsers:
             token = pavlovia.knownUsers[user]['token']
             try:
-                pavlovia.getCurrentSession().setToken(token)
+                pavlovia.login(token)
             except requests.exceptions.ConnectionError:
                 logging.warning("Tried to log in to Pavlovia but no network "
                                 "connection")
@@ -107,9 +113,7 @@ class PavloviaMenu(wx.Menu):
             PavloviaMenu.searchDlg.updateUserProjs()
 
     def onSync(self, event):
-        retVal = syncProject(parent=self.parent, project=self.parent.project)
-        if hasattr(self.parent, 'gitFeedback'):
-            self.parent.gitFeedback(retVal)
+        syncProject(parent=self.parent, project=self.parent.project)
 
     def onSearch(self, event):
         PavloviaMenu.searchDlg = SearchFrame(app=self.parent.app)
@@ -121,13 +125,13 @@ class PavloviaMenu(wx.Menu):
     def onNew(self, event):
         """Create a new project
         """
-        if pavlovia.getCurrentSession().user.username:
-            projEditor = ProjectEditor()
-            if projEditor.ShowModal() == wx.ID_OK:
-                self.parent.project = projEditor.project
-                # do a first sync as well
-                retVal = syncProject(parent=self.parent, project=projEditor.project)
-                self.parent.gitFeedback(retVal)
+        # Get session
+        session = pavlovia.getCurrentSession()
+        # If logged in, create project
+        if session.user:
+            dlg = sync.CreateDlg(self.parent, user=session.user)
+            dlg.ShowModal()
+        # Otherwise, prompt user to log in
         else:
             infoDlg = dialogs.MessageDialog(parent=None, type='Info',
                                             message=_translate(

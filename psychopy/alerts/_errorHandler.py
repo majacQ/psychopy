@@ -2,12 +2,11 @@
 # -*- coding: utf-8 -*-
 
 # Part of the PsychoPy library
-# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2021 Open Science Tools Ltd.
+# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2024 Open Science Tools Ltd.
 # Distributed under the terms of the GNU General Public License (GPL).
 
-from ._alerts import _activeAlertHandlers
 
-class _BaseErrorHandler(object):
+class _BaseErrorHandler:
     """A base class for handling PsychoPy alerts and exceptions.
     """
 
@@ -16,7 +15,6 @@ class _BaseErrorHandler(object):
         self.alerts = []
         self.alwaysReceive = alwaysReceive
         self.autoFlush = autoFlush
-        _activeAlertHandlers.append(self)
 
     def write(self, toWrite):
         """This is needed for any Python Exceptions, which assume the stderr
@@ -45,6 +43,8 @@ class _BaseErrorHandler(object):
             A data object containing alert information.
         """
         self.alerts.append(alert)
+        if self.autoFlush:
+            self.flush()
 
     def __del__(self):
         self.flush()

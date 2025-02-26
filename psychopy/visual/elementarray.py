@@ -6,13 +6,8 @@ independently controlled. Suitable for creating 'global form' stimuli or more
 detailed random dot stimuli."""
 
 # Part of the PsychoPy library
-# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2021 Open Science Tools Ltd.
+# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2024 Open Science Tools Ltd.
 # Distributed under the terms of the GNU General Public License (GPL).
-
-from __future__ import absolute_import, division, print_function
-
-from builtins import str
-from past.utils import old_div
 
 # Ensure setting pyglet.options['debug_gl'] to False is done prior to any
 # other calls to pyglet or pyglet submodules, otherwise it may not get picked
@@ -35,17 +30,23 @@ from psychopy.visual import Window
 from psychopy.tools.arraytools import val2array
 from psychopy.tools.attributetools import attributeSetter, logAttrib, setAttribute
 from psychopy.tools.monitorunittools import convertToPix
+from psychopy.tools import gltools as gt
 from psychopy.visual.helpers import setColor
 from psychopy.visual.basevisual import MinimalStim, TextureMixin, ColorMixin
 from . import globalVars
 
 import numpy
 
+USE_LEGACY_GL = pyglet.version < '2.0'
+
 
 class ElementArrayStim(MinimalStim, TextureMixin, ColorMixin):
     """This stimulus class defines a field of elements whose behaviour can
-    be independently controlled. Suitable for creating 'global form' stimuli
-    or more detailed random dot stimuli.
+    be independently controlled. Suitable for creating 'global form'
+    stimuli or more detailed random dot stimuli. This is a lazy-imported
+    class, therefore import using full path 
+    `from psychopy.visual.elementarray import ElementArrayStim` when
+    inheriting from it.
 
     This stimulus can draw thousands of elements without dropping a frame,
     but in order to achieve this performance, uses several OpenGL extensions
@@ -119,12 +120,11 @@ class ElementArrayStim(MinimalStim, TextureMixin, ColorMixin):
         self._needVertexUpdate = True
         self._needColorUpdate = True
         self._RGBAs = None
-        self.useShaders = True
         self.interpolate = interpolate
         self.__dict__['fieldDepth'] = fieldDepth
         self.__dict__['depths'] = depths
-        if self.win.winType != 'pyglet':
-            raise TypeError('ElementArrayStim requires a pyglet context')
+        if self.win.winType == 'pygame':
+            raise TypeError('ElementArrayStim is not supported in a pygame context')
         if not self.win._haveShaders:
             raise Exception("ElementArrayStim requires shaders support"
                             " and floating point textures")
@@ -239,24 +239,24 @@ class ElementArrayStim(MinimalStim, TextureMixin, ColorMixin):
             rand = numpy.random.rand
             if self.fieldShape in ('sqr', 'square'):
                 # initialise a random array of X,Y
-                self.__dict__['xys'] = rand(self.nElements, 2) * fsz - old_div(fsz, 2)
+                self.__dict__['xys'] = rand(self.nElements, 2) * fsz - (fsz / 2)
                 # gone outside the square
-                xxx = (self.xys[:, 0] + old_div(fsz[0], 2)) % fsz[0]
-                yyy = (self.xys[:, 1] + old_div(fsz[1], 2)) % fsz[1]
-                self.__dict__['xys'][:, 0] = xxx - old_div(fsz[0], 2)
-                self.__dict__['xys'][:, 1] = yyy - old_div(fsz[1], 2)
+                xxx = (self.xys[:, 0] + (fsz[0] / 2)) % fsz[0]
+                yyy = (self.xys[:, 1] + (fsz[1] / 2)) % fsz[1]
+                self.__dict__['xys'][:, 0] = xxx - (fsz[0] / 2)
+                self.__dict__['xys'][:, 1] = yyy - (fsz[1] / 2)
             elif self.fieldShape == 'circle':
                 # take twice as many elements as we need (and cull the ones
                 # outside the circle)
                 # initialise a random array of X,Y
-                xys = rand(self.nElements * 2, 2) * fsz - old_div(fsz, 2)
+                xys = rand(self.nElements * 2, 2) * fsz - (fsz / 2)
                 # gone outside the square
-                xys[:, 0] = ((xys[:, 0] + old_div(fsz[0], 2)) % fsz[0]) - old_div(fsz[0], 2)
-                xys[:, 1] = ((xys[:, 1] + old_div(fsz[1], 2)) % fsz[1]) - old_div(fsz[1], 2)
+                xys[:, 0] = ((xys[:, 0] + (fsz[0] / 2)) % fsz[0]) - (fsz[0] / 2)
+                xys[:, 1] = ((xys[:, 1] + (fsz[1] / 2)) % fsz[1]) - (fsz[1] / 2)
                 # use a circular envelope and flips dot to opposite edge
                 # if they fall beyond radius.
                 # NB always circular - uses fieldSize in X only
-                normxy = old_div(xys, (old_div(fsz, 2.0)))
+                normxy = xys / (fsz / 2.0)
                 dotDist = numpy.sqrt((normxy[:, 0]**2.0 + normxy[:, 1]**2.0))
                 self.__dict__['xys'] = xys[dotDist < 1.0, :][0:self.nElements]
         else:
@@ -429,13 +429,13 @@ class ElementArrayStim(MinimalStim, TextureMixin, ColorMixin):
     def opacity(self):
         if hasattr(self, "_opacity"):
             return self._opacity
+
     @opacity.setter
     def opacity(self, value):
         self._opacity = value
         if hasattr(self, "_colors"):
             # Set the alpha value of each color to be the desired opacity
             self._colors.alpha = value
-
 
     @attributeSetter
     def contrs(self, value):
@@ -446,7 +446,14 @@ class ElementArrayStim(MinimalStim, TextureMixin, ColorMixin):
 
         :ref:`Operations <attrib-operations>` are supported.
         """
-        self.__dict__['contrs'] = self._makeNx1(value)
+        # Convert to an Nx1 numpy array
+        value = self._makeNx1(value)
+        # If colors is too short, extend it
+        self._colors.rgb = numpy.resize(self._colors.rgb, (len(value), 3))
+        # Set
+        self._colors.contrast = value
+        # Store value and update
+        self.__dict__['contrs'] = value
         self._needColorUpdate = True
 
     def setContrs(self, value, operation='', log=None):
@@ -495,16 +502,9 @@ class ElementArrayStim(MinimalStim, TextureMixin, ColorMixin):
         """
         setAttribute(self, 'fieldSize', value, log, operation)
 
-    def draw(self, win=None):
-        """Draw the stimulus in its relevant window. You must call
-        this method after every MyWin.update() if you want the
-        stimulus to appear on that frame and then update the screen
-        again.
+    def _drawLegacyGL(self, win):
+        """Legacy OpenGL drawing method for ElementArrayStim.
         """
-        if win is None:
-            win = self.win
-        self._selectWindow(win)
-
         if self._needVertexUpdate:
             self._updateVertices()
         if self._needColorUpdate:
@@ -570,6 +570,84 @@ class ElementArrayStim(MinimalStim, TextureMixin, ColorMixin):
         GL.glUseProgram(0)
         GL.glPopClientAttrib()
         GL.glPopMatrix()
+
+    def draw(self, win=None):
+        """Draw the stimulus in its relevant window. You must call
+        this method after every MyWin.update() if you want the
+        stimulus to appear on that frame and then update the screen
+        again.
+        """
+        if win is None:
+            win = self.win
+        self._selectWindow(win)
+
+        if win.USE_LEGACY_GL:  # use legacy draw functions
+            self._drawLegacyGL(win)
+            return
+
+        # scale the drawing frame and get to centre of field
+        win.setOrthographicView()
+        win.setScale('pix')
+
+        if self._needVertexUpdate:
+            self._updateVertices()
+        if self._needColorUpdate:
+            self.updateElementColors()
+        if self._needTexCoordUpdate:
+            self.updateTextureCoords()
+
+        GL.glEnable(GL.GL_BLEND)
+
+        # setup the shaderprogram
+        _prog = self.win._progSignedTexMask
+        gt.useProgram(_prog)
+
+        GL.glActiveTexture(GL.GL_TEXTURE1)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, self._maskID)
+        GL.glEnable(GL.GL_TEXTURE_2D)
+        GL.glActiveTexture(GL.GL_TEXTURE0)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, self._texID)
+        GL.glEnable(GL.GL_TEXTURE_2D)
+
+        gt.setUniformSampler2D(_prog, b'uTexture', 0)
+        gt.setUniformSampler2D(_prog, b'uMask', 1)
+        gt.setUniformValue(_prog, b'uColor', [1., 1., 1., 1.])
+        alphaThreshold = getattr(self, 'alphaThreshold', 1.0)
+        gt.setUniformValue(
+            _prog, b'uAlphaThreshold', alphaThreshold, ignoreNotDefined=True)
+        gt.setUniformMatrix(
+            _prog, 
+            b'uProjectionMatrix', 
+            win._projectionMatrix,
+            transpose=True)
+        gt.setUniformMatrix(
+            _prog, 
+            b'uModelViewMatrix', 
+            win._viewMatrix,
+            transpose=True)
+
+        verticesPix = self.verticesPix.reshape(-1, 3)
+        RGBAs = self._RGBAs.reshape(-1, 4)
+        texCoords = self._texCoords.reshape(-1, 2)
+        maskCoords = self._maskCoords.reshape(-1, 2)
+
+        gt.drawClientArrays({
+            'gl_Vertex': verticesPix,
+            'gl_Color': RGBAs,
+            'gl_MultiTexCoord0': texCoords,
+            'gl_MultiTexCoord1': maskCoords}, 
+            'GL_QUADS')
+        
+        gt.useProgram(None)
+
+        GL.glActiveTexture(GL.GL_TEXTURE1)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+        GL.glDisable(GL.GL_TEXTURE_2D)
+        GL.glActiveTexture(GL.GL_TEXTURE0)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+        GL.glDisable(GL.GL_TEXTURE_2D)
+
+        GL.glDisable(GL.GL_BLEND)
 
     def _updateVertices(self):
         """Sets Stim.verticesPix from fieldPos.
@@ -646,10 +724,10 @@ class ElementArrayStim(MinimalStim, TextureMixin, ColorMixin):
         # for the main texture
         # sf is dependent on size (openGL default)
         if self.units in ['norm', 'pix', 'height']:
-            L = old_div(-self.sfs[:, 0], 2) - self.phases[:, 0] + 0.5
-            R = old_div(+self.sfs[:, 0], 2) - self.phases[:, 0] + 0.5
-            T = old_div(+self.sfs[:, 1], 2) - self.phases[:, 1] + 0.5
-            B = old_div(-self.sfs[:, 1], 2) - self.phases[:, 1] + 0.5
+            L = (-self.sfs[:, 0] / 2) - self.phases[:, 0] + 0.5
+            R = (+self.sfs[:, 0] / 2) - self.phases[:, 0] + 0.5
+            T = (+self.sfs[:, 1] / 2) - self.phases[:, 1] + 0.5
+            B = (-self.sfs[:, 1] / 2) - self.phases[:, 1] + 0.5
         else:
             # we should scale to become independent of size
             L = (-self.sfs[:, 0] * self.sizes[:, 0] / 2

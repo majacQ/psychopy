@@ -13,16 +13,12 @@ ListWidget:
     the user to add/remove entries. e.g. expInfo control
 """
 
-from __future__ import absolute_import, print_function
-
-from builtins import str
-from builtins import range
 import wx
 from wx.lib.newevent import NewEvent
 
 from psychopy import logging
 from psychopy.localization import _translate
-from pkg_resources import parse_version
+from packaging.version import Version
 
 
 class MessageDialog(wx.Dialog):
@@ -46,49 +42,17 @@ class MessageDialog(wx.Dialog):
         sizer = wx.BoxSizer(wx.VERTICAL)
         sizer.Add(wx.StaticText(self, -1, message), flag=wx.ALL, border=15)
         # add buttons
-        btnSizer = wx.BoxSizer(wx.HORIZONTAL)
         if type == 'Warning':  # we need Yes,No,Cancel
-            self.yesBtn = wx.Button(self, wx.ID_YES, _translate('Yes'))
-            self.yesBtn.SetDefault()
-            self.cancelBtn = wx.Button(
-                self, wx.ID_CANCEL, _translate('Cancel'))
-            self.noBtn = wx.Button(self, wx.ID_NO, _translate('No'))
-            self.Bind(wx.EVT_BUTTON, self.onButton, id=wx.ID_CANCEL)
-            self.Bind(wx.EVT_BUTTON, self.onButton, id=wx.ID_YES)
-            self.Bind(wx.EVT_BUTTON, self.onButton, id=wx.ID_NO)
-#            self.Bind(wx.EVT_CLOSE, self.onEscape)
-            btnSizer.Add(self.cancelBtn, 0,
-                         wx.ALL | wx.LEFT | wx.ALIGN_CENTER_VERTICAL,
-                         border=3)
-            btnSizer.AddStretchSpacer()
-            btnSizer.Add(self.noBtn, 0,
-                         wx.ALL | wx.RIGHT | wx.ALIGN_CENTER_VERTICAL,
-                         border=3)
-            btnSizer.Add(self.yesBtn, 0,
-                         wx.ALL | wx.RIGHT | wx.ALIGN_CENTER_VERTICAL,
-                         border=3)
+            btnSizer = self.CreateStdDialogButtonSizer(flags=wx.YES | wx.NO | wx.CANCEL)
         elif type == 'Query':  # we need Yes,No
-            self.yesBtn = wx.Button(self, wx.ID_YES, _translate('Yes'))
-            self.yesBtn.SetDefault()
-            self.noBtn = wx.Button(self, wx.ID_NO, _translate('No'))
-            self.Bind(wx.EVT_BUTTON, self.onButton, id=wx.ID_YES)
-            self.Bind(wx.EVT_BUTTON, self.onButton, id=wx.ID_NO)
-#            self.Bind(wx.EVT_CLOSE, self.onEscape)
-            btnSizer.Add(self.noBtn, 0,
-                         wx.ALL | wx.RIGHT | wx.ALIGN_CENTER_VERTICAL,
-                         border=3)
-            btnSizer.Add(self.yesBtn, 0,
-                         wx.ALL | wx.RIGHT | wx.ALIGN_CENTER_VERTICAL,
-                         border=3)
+            btnSizer = self.CreateStdDialogButtonSizer(flags=wx.YES | wx.NO)
         elif type == 'Info':  # just an OK button
-            self.okBtn = wx.Button(self, wx.ID_OK, _translate('OK'))
-            self.okBtn.SetDefault()
-            self.Bind(wx.EVT_BUTTON, self.onButton, id=wx.ID_OK)
-            btnSizer.Add(self.okBtn, 0,
-                         wx.ALL | wx.RIGHT | wx.ALIGN_CENTER_VERTICAL,
-                         border=3)
+            btnSizer = self.CreateStdDialogButtonSizer(flags=wx.OK)
         else:
             raise NotImplementedError('Message type %s unknown' % type)
+        for btn in btnSizer.GetChildren():
+            if hasattr(btn.Window, "Bind"):
+                btn.Window.Bind(wx.EVT_BUTTON, self.onButton)
         # configure sizers and fit
         sizer.Add(btnSizer,
                   flag=wx.ALL | wx.EXPAND, border=5)
@@ -113,6 +77,38 @@ class MessageDialog(wx.Dialog):
 
 # Event for GlobSizer-----------------------------------------------------
 (GBSizerExLayoutEvent, EVT_GBSIZEREX_LAYOUT) = NewEvent()
+
+
+class RichMessageDialog(wx.Dialog):
+    def __init__(
+            self,
+            parent=None,
+            message="",
+            title="",
+            size=(600, 500),
+            style=wx.RESIZE_BORDER
+    ):
+        from psychopy.app.utils import MarkdownCtrl
+        # initialise dialog
+        wx.Dialog.__init__(
+            self, parent,
+            title=title,
+            size=size,
+            style=style
+        )
+        # setup sizer
+        self.border = wx.BoxSizer(wx.VERTICAL)
+        self.SetSizer(self.border)
+        self.sizer = wx.BoxSizer(wx.VERTICAL)
+        self.border.Add(self.sizer, proportion=1, border=6, flag=wx.EXPAND | wx.ALL)
+        # add markdown ctrl
+        self.ctrl = MarkdownCtrl(
+            self, value=message, style=wx.TE_READONLY
+        )
+        self.sizer.Add(self.ctrl, border=6, proportion=1, flag=wx.EXPAND | wx.ALL)
+        # add OK button
+        self.btns = self.CreateStdDialogButtonSizer(flags=wx.OK)
+        self.border.Add(self.btns, border=12, flag=wx.EXPAND | wx.ALL)
 
 
 class GlobSizer(wx.GridBagSizer):
@@ -536,7 +532,9 @@ class ListWidget(GlobSizer):
         """
         GlobSizer.__init__(self, hgap=2, vgap=2)
         self.parent = parent
-        self.value = value if value else [{"Field":"", "Default": ""}]
+        if value is None:
+            value = [{'Field': "", 'Default': ""}]
+        self.value = value
         if type(value) != list:
             msg = 'The initial value for a ListWidget must be a list of dicts'
             raise AttributeError(msg)
@@ -617,17 +615,28 @@ class ListWidget(GlobSizer):
             currValue.append(thisEntry)
         return currValue
 
+    def getValue(self):
+        """
+        Return value as a dict so it's label-agnostic.
+
+        Returns
+        -------
+        dict
+            key:value pairs represented by the two columns of this ctrl
+        """
+        currValue = {}
+        # skipping the first row (headers)
+        for rowN in range(self.GetRows())[1:]:
+            keyCtrl = self.FindItemAtPosition((rowN, 0)).GetWindow()
+            valCtrl = self.FindItemAtPosition((rowN, 1)).GetWindow()
+            currValue[keyCtrl.GetValue()] = valCtrl.GetValue()
+        return currValue
+
     def GetValue(self):
         """Provided for compatibility with other wx controls. Returns the
         current value of the list of dictionaries represented in the grid
         """
         return self.getListOfDicts()
-
-    def SetToolTipString(self, tip):
-        """This isn't implemented yet.
-        Set every control to have the same tooltip?
-        """
-        pass
 
     def SetValidator(self, validator):
         # Set Validator on every applicable child element
@@ -643,7 +652,7 @@ class ListWidget(GlobSizer):
 
 
 if __name__ == '__main__':
-    if parse_version(wx.__version__) < parse_version('2.9'):
+    if Version(wx.__version__) < Version('2.9'):
         app = wx.PySimpleApp()
     else:
         app = wx.App(False)

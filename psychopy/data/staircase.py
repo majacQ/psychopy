@@ -1,23 +1,13 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-from __future__ import absolute_import, division, print_function
-
-# from future import standard_library
-# standard_library.install_aliases()
-from builtins import zip
-from builtins import next
-from past.builtins import basestring
-from past.builtins import str
-from builtins import range
-import string
 import sys
 import os
 import pickle
 import copy
 import warnings
 import numpy as np
-from pkg_resources import parse_version
+from packaging.version import Version
 
 import psychopy
 from psychopy import logging
@@ -36,7 +26,7 @@ except ImportError:
 try:
     # import openpyxl
     import openpyxl
-    if parse_version(openpyxl.__version__) >= parse_version('2.4.0'):
+    if Version(openpyxl.__version__) >= Version('2.4.0'):
         # openpyxl moved get_column_letter to utils.cell
         from openpyxl.utils.cell import get_column_letter
     else:
@@ -94,6 +84,8 @@ class StairHandler(_BaseTrialHandler):
                 reversals to perform, `nReversals`, is less than the
                 length of this list, PsychoPy will automatically increase
                 the minimum number of reversals and emit a warning.
+                This minimum number of reversals is always set to be
+                greater than 0.
 
             stepSizes:
                 The size of steps as a single value or a list (or array).
@@ -198,7 +190,7 @@ class StairHandler(_BaseTrialHandler):
         self.currentDirection = 'start'
         # correct since last stim change (minus are incorrect):
         self.correctCounter = 0
-        self._nextIntensity = self.startVal
+        self.intensity = self.startVal
         self.minVal = minVal
         self.maxVal = maxVal
         self.autoLog = autoLog
@@ -211,6 +203,16 @@ class StairHandler(_BaseTrialHandler):
 
     def __iter__(self):
         return self
+
+    @property
+    def intensity(self):
+        """The intensity (level) of the current staircase"""
+        return self._nextIntensity
+
+    @intensity.setter
+    def intensity(self, intensity):
+        """The intensity (level) of the current staircase"""
+        self._nextIntensity = intensity
 
     def addResponse(self, result, intensity=None):
         """Add a 1 or 0 to signify a correct / detected or
@@ -256,7 +258,7 @@ class StairHandler(_BaseTrialHandler):
         """
         if not dataName in self.otherData:  # init the list
             if self.thisTrialN > 0:
-                # might have run trals already
+                # might have run trials already
                 self.otherData[dataName] = [None] * (self.thisTrialN - 1)
             else:
                 self.otherData[dataName] = []
@@ -270,8 +272,8 @@ class StairHandler(_BaseTrialHandler):
         """Deprecated since 1.79.00: This function name was ambiguous.
         Please use one of these instead:
 
-            .addResponse(result, intensity)
-            .addOtherData('dataName', value')
+        *   .addResponse(result, intensity)
+        *   .addOtherData('dataName', value')
 
         """
         self.addResponse(result, intensity)
@@ -718,7 +720,7 @@ class QuestHandler(StairHandler):
                                      pos=[0,0], units='deg')
         ...
         # create staircase object
-        # trying to find out the point where subject's response is 50 / 50
+        # trying to find out the contrast where subject gets 63% correct
         # if wanted to do a 2AFC then the defaults for pThreshold and gamma
         # are good. As start value, we'll use 50% contrast, with SD = 20%
         staircase = data.QuestHandler(0.5, 0.2,
@@ -865,7 +867,9 @@ class QuestHandler(StairHandler):
 
         self.startVal = startVal
         self.startValSd = startValSd
+        self.pThreshold = pThreshold
         self.stopInterval = stopInterval
+        # NB there is also _nextIntensity
         self._questNextIntensity = startVal
         self._range = range
 
@@ -881,6 +885,8 @@ class QuestHandler(StairHandler):
         self.originPath, self.origin = self.getOriginPathAndFile(originPath)
         self._exp = None
         self.autoLog = autoLog
+
+    # NB we inherit self.intensity from StairHandler
 
     @property
     def beta(self):
@@ -969,7 +975,7 @@ class QuestHandler(StairHandler):
         if self.method == 'mean':
             self._questNextIntensity = self._quest.mean()
         elif self.method == 'mode':
-            self._questNextIntensity = self._quest.mode()
+            self._questNextIntensity = self._quest.mode()[0]
         elif self.method == 'quantile':
             self._questNextIntensity = self._quest.quantile()
         else:
@@ -1315,10 +1321,10 @@ class PsiHandler(StairHandler):
         """Saves the posterior array over probLambda as a pickle file
         with the specified name.
 
-        :Parameters:
+        Parameters
+        ----------
         fileCollisionMethod : string
-            Collision method passed to
-            :func:`~psychopy.tools.fileerrortools.handleFileCollision`
+            Collision method passed to :func:`~psychopy.tools.fileerrortools.handleFileCollision`
 
         """
         try:
@@ -1350,10 +1356,9 @@ class QuestPlusHandler(StairHandler):
 
         The parameter estimates can be retrieved via the `.paramEstimate`
         attribute, which returns a dictionary whose keys correspond to the
-        names of the estimated parameters
-        (i.e., `QuestPlusHandler.paramEstimate['threshold']` will provide the
-         threshold estimate). Retrieval of the marginal posterior distributions
-         works similarly: they can be accessed via the `.posterior` dictionary.
+        names of the estimated parameters (i.e., `QuestPlusHandler.paramEstimate['threshold']`
+        will provide the threshold estimate). Retrieval of the marginal posterior distributions works
+        similarly: they can be accessed via the `.posterior` dictionary.
 
         Parameters
         ----------
@@ -1440,7 +1445,7 @@ class QuestPlusHandler(StairHandler):
         paramEstimationMethod : {'mean', 'mode'}
             How to calculate the final parameter estimate. `mean` returns the
             mean of each parameter, weighted by their respective posterior
-            probabilities. `mode` returns the the parameters at the peak of
+            probabilities. `mode` returns the parameters at the peak of
             the posterior distribution.
 
         extraInfo : dict
@@ -1962,6 +1967,8 @@ class MultiStairHandler(_BaseTrialHandler):
                     exp.addData(self.name + '.stepType', stair.stepType)
 
                 exp.addData(self.name + '.intensity', self._nextIntensity)
+
+            self._trialAborted = False  # reset this flag
             return self._nextIntensity, self.currentStaircase.condition
         else:
             raise StopIteration
@@ -1990,6 +1997,55 @@ class MultiStairHandler(_BaseTrialHandler):
         else:
             raise ValueError('Unknown randomization method requested.')
 
+    @property
+    def intensity(self):
+        """The intensity (level) of the current staircase"""
+        return self.currentStaircase._nextIntensity
+
+    @intensity.setter
+    def intensity(self, intensity):
+        """The intensity (level) of the current staircase"""
+        self.currentStaircase._nextIntensity = intensity
+
+    def abortCurrentTrial(self, action='random'):
+        """Abort the current trial (staircase).
+
+        Calling this during an experiment abort the current staircase used this
+        trial. The current staircase will be reshuffled into available 
+        staircases depending on the `action` parameter.
+
+        Parameters
+        ----------
+        action : str
+            Action to take with the aborted trial. Can be either of `'random'`,
+            or `'append'`. The default action is `'random'`.
+
+        Notes
+        -----
+        * When using `action='random'`, the RNG state for the trial handler is
+          not used.
+
+        """
+        # check if value for parameter `action` is valid
+        if not isinstance(action, str):  # type checks for params
+            raise TypeError(
+                "Parameter `action` specified incorrect type, must be `str`.")
+        
+        # reinsert the current staircase into the list of running staircases
+        if action == 'append':
+            self.thisPassRemaining.append(self.currentStaircase)
+        elif action == 'random':
+            self.thisPassRemaining.append(self.currentStaircase)
+            # shuffle using the numpy RNG to preserve state
+            np.random.shuffle(self.thisPassRemaining)
+        else:
+            raise ValueError(
+                "Value for parameter `action` must be either 'random' or "
+                "'append'.")
+
+        # set flag to indicate that the trial was aborted
+        self._trialAborted = True  
+
     def addResponse(self, result, intensity=None):
         """Add a 1 or 0 to signify a correct / detected or
         incorrect / missed trial
@@ -2015,14 +2071,14 @@ class MultiStairHandler(_BaseTrialHandler):
         the response (0 or 1) or some other data concerning the trial so
         there is now a pair of explicit methods:
 
-            addResponse(corr,intensity) #some data that alters the next
+        *   addResponse(corr,intensity) #some data that alters the next
                 trial value
-            addOtherData('RT', reactionTime) #some other data that won't
+        *   addOtherData('RT', reactionTime) #some other data that won't
                 control staircase
 
         """
         self.addResponse(result, intensity)
-        if isinstance(result, basestring):
+        if isinstance(result, str):
             raise TypeError("MultiStairHandler.addData should only receive "
                             "corr / incorr. Use .addOtherData('datName',val)")
 
@@ -2185,3 +2241,7 @@ class MultiStairHandler(_BaseTrialHandler):
             label = thisStair.condition['label']
             thisStair.saveAsText(fileName='stdout', delim=delim,
                                  matrixOnly=thisMatrixOnly)
+
+
+if __name__ == "__main__":
+    pass

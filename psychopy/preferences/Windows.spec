@@ -26,8 +26,6 @@
 
 # General settings
 [general]
-    # which system to use as a backend for drawing
-    winType = option('pyglet', 'pygame', 'glfw', default='pyglet')
     # the default units for windows and visual stimuli
     units = option('deg', 'norm', 'cm', 'pix', 'height', default='norm')
     # full screen is best for accurate timing
@@ -48,13 +46,17 @@
     gammaErrorPolicy = option('abort', 'warn', default='abort')
     # Add plugin names here to load when a PsychoPy session starts.
     startUpPlugins = list(default=list())
+    # Google Cloud Platform key, required for the audio transcription using Google Speech Recognition. Specified as a path to a JSON file containing the key data.
+    appKeyGoogleCloud = string(default='')
+    # LEGACY: which system to use as a backend for drawing
+    winType = option('pyglet', 'pygame', 'glfw', default='pyglet')
 
 # Application settings, applied to coder, builder, & prefs windows
 [app]
     # display tips when starting PsychoPy
     showStartupTips = boolean(default='True')
     # what windows to display when PsychoPy starts
-    defaultView = option('builder', 'coder', 'runner', 'all', default='all')
+    defaultView = option('last', 'builder', 'coder', 'runner', 'all', default='last')
     # reset preferences to defaults on next restart of PsychoPy
     resetPrefs = boolean(default='False') # default must be False!
     # save any unsaved preferences before closing the window
@@ -67,6 +69,8 @@
     errorDialog = boolean(default='True')
     # Theme
     theme = string(default='PsychopyLight')
+    # Show / hide splash screen
+    showSplash = boolean(default='True')
 
 # Settings for the Coder window
 [coder]
@@ -98,7 +102,7 @@
 # Settings for the Builder window
 [builder]
     # whether to automatically reload a previously open experiment
-    reloadPrevExp = boolean(default=False)
+    reloadPrevExp = boolean(default=True)
     # Default to when writing code components
     codeComponentLanguage = option('Py', 'JS', 'Both', 'Auto->JS', default='Auto->JS')
     # if False will create scripts with an 'easier' but more cluttered namespace
@@ -109,6 +113,8 @@
     componentFilter = option('PsychoPy', 'PsychoJS', 'Any', 'Both', default='Any')
     # a list of components to hide (eg, because you never use them)
     hiddenComponents = list(default=list('RatingScaleComponent', 'PatchComponent', 'UnknownComponent'))
+    # Abbreviate long component names to maximise timeline space?
+    abbreviateLongCompNames = boolean(default=False)
     # where the Builder demos are located on this computer (after unpacking)
     unpackedDemosDir = string(default='')
     # name of the folder where subject data should be saved (relative to the script)
@@ -119,14 +125,15 @@
     alwaysShowReadme = boolean(default=True)
     # Upper limit on how many components can be in favorites
     maxFavorites = integer(default=10)
+    # Ask for confirmation when closing a routine tab.
+    confirmRoutineClose = boolean(default=True)
 
+# Settings for hardware
 [hardware]
-    # choice of audio library
-    audioLib = list(default=list('sounddevice','PTB', 'pyo', 'pygame'))
-    # latency mode for PsychToolbox audio (3 is good for most applications. See
-    audioLatencyMode = option(0, 1, 2, 3, 4, default=3)
-    # use only WASAPI for audio input on Windows
-    audioForceWASAPI = boolean(default=True)
+    # LEGACY: choice of audio library
+    audioLib = list(default=list('ptb', 'sounddevice', 'pyo', 'pygame'))
+    # exclude non-WASAPI audio devices
+    audioWASAPIOnly = boolean(default=True)
     # audio driver to use
     audioDriver = list(default=list('Primary Sound','ASIO','Audigy'))
     # audio device to use (if audioLib allows control)
@@ -135,6 +142,23 @@
     parallelPorts = list(default=list('0x0378', '0x03BC'))
     # The name of the Qmix pump configuration to use
     qmixConfiguration = string(default='qmix_config')
+
+# Settings for piloting mode
+[piloting]
+    # Prevent the experiment from being fullscreen when piloting
+    forceWindowed = boolean(default=True)
+    # What window size to use when forced to windowed mode
+    forcedWindowSize = list(default=list(800, 600))
+    # How much output to include in the log file when piloting ('error' is fewest messages, 'debug' is most)
+    pilotLoggingLevel = option('error', 'warning', 'data', 'exp', 'info', 'debug', default='debug')
+    # How much output to display in the console / app when piloting ('error' is fewest messages, 'debug' is most).
+    pilotConsoleLoggingLevel = option('error', 'warning', 'data', 'exp', 'info', 'debug', default='warning')
+    # Show an orange border around the window when in piloting mode
+    showPilotingIndicator = boolean(default=True)
+    # Prevent experiment from enabling rush mode when piloting
+    forceNonRush = boolean(default=True)
+    # Replace default participant ID with "pilot" when piloting
+    replaceParticipantID = boolean(default=True)
 
 # Settings for connections
 [connections]
@@ -159,6 +183,8 @@
     save = string(default='Ctrl+S')
     # save a Builder or Coder file under a new name
     saveAs = string(default='Ctrl+Shift+S')
+    # reveal the folder containing the current Builder file
+    revealFolder = string(default='Alt+Shift+R')
     # Coder: print the file
     print = string(default='Ctrl+P')
     # close the Builder or Coder window
@@ -223,6 +249,8 @@
     # Coder: show / hide indentation level lines
     toggleIndentGuides = string(default='Ctrl+Shift+I')
 
+    # Builder: edit experiment settings
+    expSettings = string(default='Ctrl+Shift+X')
     # Builder: create a new routine
     newRoutine = string(default='Ctrl+Shift+N')
     # Builder: copy an existing routine
@@ -231,10 +259,12 @@
     pasteRoutine = string(default='Ctrl+Shift+V')
     # Builder: paste the copied component
     pasteCompon = string(default='Ctrl+Alt+V')
+    # Builder: find
+    builderFind = string(default='Ctrl+F')
     # Coder: show / hide the output panel
     toggleOutputPanel = string(default='Ctrl+Shift+O')
     #Builder: rename an existing routine
-    renameRoutine = string(default='Ctrl+Shift+R')
+    renameRoutine = string(default='Ctrl+Shift+M')
     # switch between windows
     cycleWindows = string(default='Ctrl+L')
     # increase display size in Flow
